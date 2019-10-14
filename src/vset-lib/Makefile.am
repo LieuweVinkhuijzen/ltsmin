@@ -36,6 +36,14 @@ libvset_la_LDFLAGS  += $(MCRL_LDFLAGS)
 libvset_la_LIBADD   += -lATerm
 endif
 
+#if HAVE_SDD
+libvset_la_SOURCES += vset_sdd.c
+#libvset_la_LIBADD  +=
+libvset_la_LDFLAGS += -I /home/lieuwe/sdd-package-2.0/libsdd-2.0/include -L/home/lieuwe/sdd-package-2.0/libsdd-2.0/lib -lsdd -lm
+# $(SDD_LDFLAGS)
+libvset_la_CFLAGS  += $(SDD_CFLAGS)
+#endif
+
 if HAVE_LIBDDD
 libvset_la_SOURCES  += vset_ddd.cpp
 nodist_EXTRA_libvset_la_SOURCES = automake-force-linker.cxx
@@ -43,4 +51,3 @@ libvset_la_CPPFLAGS += $(DDD_CPPFLAGS)
 libvset_la_LDFLAGS  += $(DDD_LDFLAGS)
 libvset_la_LIBADD   += $(DDD_LIBS)
 endif
-
