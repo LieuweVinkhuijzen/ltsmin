@@ -3,24 +3,12 @@
 
 /* SDD API for the LTSmin library
  *
+ * Author: Lieuwe Vinkhuijzen
+ *
  * Keep in mind that this library numbers its variables from 0...n-1,
  *   whereas SDDs number their variables 1...n
  *   This conversion is "hidden" from the calling LTSmin library,
  *   but this will cause a number of headaches
- */
-
-/* status: Testing hypothesis
- *   Currently, in rel_update, we give the cb(.., e) function a state vector
- *   Currently this state vector spans all variables.
- * Hypothesis: We are supposed to return a state vector which spans only those variables
- *   that appear in the relation, as opposed to all variables.
- *   Phase 1: Test without separating rw, so that read and write variables are the same
- *   Phase 2: Test separating rw, taking into account to take the union of the sets
- *     (this is not a big hurdle, because the lists are sorted)
- * Oh my it looks like we're already implementing this thing! Let's switch our hypothesis:
- * hypothesis: We are supposed to return a full state vector
- * -----
- * Well I implemented it and it doesn't work either :-(
  */
 
 #include <vset-lib/vdom_object.h>
@@ -32,21 +20,34 @@
 #include "stdio.h"
 #include <hre/user.h>
 #include <hre-io/user.h>
-
-//#include "vector.h"
-
-/* 14/08/2019 Log
- * rel update seems not to add elements to rel
- * Caller seems to call rel_add_copy. Implement that and then check back here.
- *
- */
+#include <time.h>
 
 //#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
 
-// The model 00000 is enumerated, while only the model 10000 is in the set :-(
+#define smart_rel_update // Whether to do a smart, non-incremental rel_update
+
+/* TODO
+ * Idea: In rel_update, don't add models to rel one at a time
+ *   Instead, collect the new models in a separate SDD called SddNode* new_models
+ *   and then once the collection is complete, call
+ *   rel = sdd_disjoin( rel, new_model , sisyphus)
+ */
 
 static int xstatebits = 16;  // bits per integer
 unsigned int enum_error = 0; // flag whether enum has gone wrong yet
+const float sdd_gc_threshold = 0.6; // Do SDD garbage collection when more than gc_treshold % of nodes are dead nodes
+const SddSize sdd_gc_threshold_abs = 10000000; // Absolute threshold: 10MB
+unsigned int gc_count = 0; // Number of garbage collections
+unsigned int exploration_started = 0; // Whether the first element has been added yet
+double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
+double union_time   = 0;  // Amount of time used by sdd_disjoin
+double conjoin_time = 0;  // Amount of time used by sdd_conjoin
+double debug_time   = 0;  // Amount of time spent on safety checks and sanity checks
+double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
+double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
+double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
+
+SddNode* rel_update_smart_temp;
 
 struct vector_domain
 {
@@ -126,7 +127,6 @@ struct vector_set_ll {
 	int* proj;
 	vset_ll_t next;
 };
-
 
 vrel_ll_t first_vrel = 0;
 vrel_ll_t last_vrel = 0;
@@ -262,10 +262,22 @@ struct poptOption sdd_options[] = {
     POPT_TABLEEND
 };
 
-// Our approach uses one SDD manager, which we will call Sisyphys,
+// Our approach uses one SDD manager, which we will call Sisyphus,
 // after the Greek mythological figure, condemned to endlessly roll a boulder up a hill,
 // only to see all his work undone, and to start over again from the bottom
 SddManager* sisyphus = NULL;
+
+SddSize sdd_memory_footprint() {
+	return 0; // A bit optimistic
+}
+
+void print_footprint() {
+	printf("Time profile: E|U|I|R|Ri|enum\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\n",
+			exists_time / CLOCKS_PER_SEC, union_time / CLOCKS_PER_SEC,
+			conjoin_time / CLOCKS_PER_SEC, rel_update_time / CLOCKS_PER_SEC, rel_increment_time / CLOCKS_PER_SEC,
+			sdd_enumerate_time / CLOCKS_PER_SEC);
+	printf("Memory footprint: gc[%u]\t%lu  |\t%lu\n", gc_count, sdd_manager_live_size(sisyphus) / 4096, sdd_manager_dead_size(sisyphus) / 4096);
+}
 
 // Returns an SDD in which all primes have value 0
 SddNode* sdd_primes_zero() {
@@ -274,6 +286,10 @@ SddNode* sdd_primes_zero() {
 		z = sdd_conjoin(z, sdd_manager_literal(-v, sisyphus), sisyphus);
 	}
 	return z;
+}
+
+void find_static_vtree() {
+	printf("Finding static vtree.\n");
 }
 
 static SddModelCount set_count_exact(vset_t set) {
@@ -364,6 +380,30 @@ SddNode* sdd_getCubeLiterals(int* literals, unsigned int nVars) {
 		conj = sdd_conjoin(conj, sdd_manager_literal(literals[i], sisyphus), sisyphus);
 	}
 	return conj;
+}
+
+void sdd_set_and_ref(vset_t set, SddNode* S) {
+	sdd_ref(S, sisyphus);
+	sdd_deref(set->sdd, sisyphus);
+	set->sdd = S;
+	//sdd_manager_garbage_collect(sisyphus);
+	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
+		sdd_manager_garbage_collect(sisyphus);
+//		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
+		//printf("Sdd Garbage Collect.\n");
+		gc_count++;
+	}
+}
+
+void sdd_set_rel_and_ref(vrel_t rel, SddNode* R) {
+	sdd_ref(R, sisyphus);
+	sdd_deref(rel->sdd, sisyphus);
+	rel->sdd = R;
+	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
+		sdd_manager_garbage_collect(sisyphus);
+//		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
+		gc_count++;
+	}
 }
 
 void vset_exposition(vset_t set) {
@@ -567,7 +607,7 @@ static vset_t set_create(vdom_t dom, int k, int* proj) {
 }
 
 static void set_destroy(vset_t set) {
-	printf("[Sdd] set destroy.\n");
+//	printf("[Sdd] set destroy.\n");
 	// :-(
 	set->sdd = sdd_manager_false(sisyphus);
 }
@@ -659,6 +699,7 @@ static vrel_t rel_create_rw(vdom_t dom, int r_k, int* r_proj, int w_k, int* w_pr
 static void rel_destroy(vrel_t rel) {
 //	printf("[Sdd] rel destroy.\n");
 	// TODO like, deallocate or gc
+	sdd_deref(rel->sdd, sisyphus);
 	rel->sdd = sdd_manager_false(sisyphus);
 }
 
@@ -723,13 +764,18 @@ static void state_to_cube(vdom_t dom, int k, const int* proj, const int* state, 
 // Adds the state vector e to the set
 // e has length dom->vectorsize and each 4-byte integer contains xstatebits bits
 static void set_add(vset_t set, const int* e) {
+	// This function is the first function that is called when exploration starts
+	if (!exploration_started) {
+		find_static_vtree();
+		exploration_started = 1;
+	}
 //	printf("[Sdd set add] set %u k=%i.\n", set->id, set->k);
 	//printf("  k: %i\n", set->k);
 	if (set->k == -1) {
 		// ???
 		uint8_t cube[set->dom->vectorsize * xstatebits];
 		state_to_cube(set->dom, set->k, set->proj, e, cube);
-		set->sdd = sdd_disjoin(set->sdd, sdd_getCube(set->state_variables, cube, set->nstate_variables), sisyphus);
+		sdd_set_and_ref(set, sdd_disjoin(set->sdd, sdd_getCube(set->state_variables, cube, set->nstate_variables), sisyphus));
 	}
 	else {
         // e is a full state vector, but this set only "cares" about a subset of the variables.
@@ -743,7 +789,7 @@ static void set_add(vset_t set, const int* e) {
         // cube is an array of 16*k bits
         uint8_t cube[set->k * xstatebits];
         state_to_cube(set->dom, set->k, set->proj, f, cube);
-        set->sdd = sdd_disjoin(set->sdd, sdd_getCube(set->state_variables, cube, set->nstate_variables), sisyphus);
+        sdd_set_and_ref(set, sdd_disjoin(set->sdd, sdd_getCube(set->state_variables, cube, set->nstate_variables), sisyphus));
 	}
 }
 
@@ -773,6 +819,7 @@ static int set_is_empty(vset_t set) {
 	//printf("[Sdd set is empty] set %u ", set->id);
 	/*
 	if (sdd_node_is_false(set->sdd)) {
+
 		printf("(Yes)\n");
 	}
 	else {
@@ -782,7 +829,7 @@ static int set_is_empty(vset_t set) {
 		//printf(")\n");
 	}
 	*/
-	printf("Memory footprint: %lu  |  %lu\n", sdd_manager_size(sisyphus), sdd_manager_count(sisyphus));
+	print_footprint();
 	return sdd_node_is_false(set->sdd) ? 1 : 0;
 }
 
@@ -793,6 +840,7 @@ static int set_equal(vset_t set1, vset_t set2) {
 
 static void set_clear(vset_t set) {
 //	printf("[Sdd set clear] set %u := (empty)\n", set->id);
+	sdd_deref(set->sdd, sisyphus);
 	set->sdd = sdd_manager_false(sisyphus);
 	//printf("  [Sdd set clear] Cleared set.\n");
 }
@@ -800,7 +848,8 @@ static void set_clear(vset_t set) {
 static void set_copy(vset_t dst, vset_t src) {
 	//printf("[Sdd set copy] set %u := set %u (mc = %llu)", dst->id, src->id, set_count_exact(src));
 	//small_enum(src); printf("\n");
-	dst->sdd = src->sdd;
+	sdd_set_and_ref(dst, src->sdd);
+//	dst->sdd = src->sdd;
 
 	// Save the fact that dst is now defined over the variables of src
 	vset_set_domain(dst, src);
@@ -831,6 +880,7 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 				getchar();
 			}
 		}
+		sdd_mit_free(mas);
 		if (i < mc) {
 			printf("\n\nWell that's curious. We got less elements than we counted models.\n"); fflush(stdout);
 			getchar();
@@ -849,7 +899,9 @@ static void set_example(vset_t set, int* e) {
 static void set_count(vset_t set, long* nodes, double* elements) {
 //	printf("[Sdd set count] set %u\n", set->id);
 	if (nodes != NULL) {
-		*nodes = sdd_count(set->sdd);
+		// we use 8 in sdd_size(set->sdd) * 8 because that is the size of a (sub,prime) element
+		//*nodes = sdd_count(set->sdd) * 18 * sizeof(unsigned int) + sdd_size(set->sdd) * 8;
+		*nodes = sdd_manager_live_size(sisyphus) * 18 * sizeof(unsigned int) + sdd_manager_live_count(sisyphus) * 2 * sizeof(unsigned int);
 	}
 	if (elements != NULL) {
 		SddModelCount mc = set_count_exact(set);
@@ -872,10 +924,12 @@ static void set_union(vset_t dst, vset_t src) {
 	static unsigned int ncalls = 0; ncalls++;
 //	printf("[Sdd set union %u]: %u := %u + %u  (mc = %llu vs %llu) (k=%i vs %i)\n", ncalls, dst->id, dst->id, src->id,
 //			set_count_exact(src), set_count_exact(dst), src->k, dst->k);
-	SddNode* dstSdd = dst->sdd;
+//	SddNode* dstSdd = dst->sdd;
+	SddModelCount srcmc = 0, dstmc = 0, unionmc = 0;
 	if (sdd_node_is_false(dst->sdd)) {
 //		printf("  [Sdd set union] dst is empty.\n");
-		dst->sdd = src->sdd;
+		sdd_set_and_ref(dst, src->sdd);
+//		dst->sdd = src->sdd;
 		//printf("  [Sdd set union] But not anymore! %llu\n", sdd_model_count(dst->sdd, sisyphus));
 		//printf("  [Sdd set union] Because src %u had %llu.\n", sdd_model_count(src->sdd, sisyphus));
 	}
@@ -885,7 +939,8 @@ static void set_union(vset_t dst, vset_t src) {
 	}
 	else {
 		if (vset_domains_are_disjoint(dst, src)) {
-			dst->sdd = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+			SddNode* conjoin = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+			sdd_set_and_ref(dst, conjoin);
 //			printf("  [Sdd set union] Uh oh, we should probably write down that the domain has changed.\n");
 			vset_add_to_domain(dst, src);
 		}
@@ -894,11 +949,19 @@ static void set_union(vset_t dst, vset_t src) {
 //			vset_exposition(src);
 //			vset_exposition(dst);
 			SddNode* dstSdd = dst->sdd;
+			clock_t before = clock();
 			SddNode* sdd_union = sdd_disjoin(dst->sdd, src->sdd, sisyphus);
-			SddModelCount srcmc = set_count_exact(src);
-			SddModelCount dstmc = set_count_exact(dst);
-			dst->sdd = sdd_union;
-			SddModelCount unionmc = set_count_exact(dst);
+			union_time += (double)(clock() - before);
+			before = clock();
+			//SddModelCount srcmc = set_count_exact(src);
+			//SddModelCount dstmc = set_count_exact(dst);
+			debug_time += (double)(clock() - before);
+//			dst->sdd = sdd_union;
+			sdd_set_and_ref(dst, sdd_union);
+/*
+			before = clock();
+			//SddModelCount unionmc = set_count_exact(dst);
+			debug_time += (double)(clock() - before);
 			if (unionmc > srcmc + dstmc) {
 				printf("  [Sdd union] something fishy going on here, %llu cup %llu = %llu.\n", srcmc, dstmc, unionmc);
 				dst->sdd = dstSdd;
@@ -913,9 +976,7 @@ static void set_union(vset_t dst, vset_t src) {
 				fflush(stdout);
 				getchar();
 			}
-			else {
-				dst->sdd = sdd_union;
-			}
+*/
 		}
 	}
 }
@@ -923,19 +984,26 @@ static void set_union(vset_t dst, vset_t src) {
 static void set_minus(vset_t dst, vset_t src) {
 //	printf("[Sdd set minus] set %u := %u \\ %u   (mc %u = %llu,  mc %u = %llu)\n", dst->id, dst->id, src->id, dst->id, set_count_exact(dst), src->id, set_count_exact(src));
 	if (dst->sdd != src->sdd) {
-		dst->sdd = sdd_conjoin(dst->sdd, sdd_negate(src->sdd, sisyphus), sisyphus);
+		clock_t before = clock();
+		SddNode* diff = sdd_conjoin(dst->sdd, sdd_negate(src->sdd, sisyphus), sisyphus);
+		conjoin_time += (double) (clock() - before);
+		sdd_set_and_ref(dst, diff);
+//		dst->sdd = sdd_conjoin(dst->sdd, sdd_negate(src->sdd, sisyphus), sisyphus);
 		//printf("  [Sdd set minus] now &(%u->sdd) = %p\n", dst->id, dst->sdd);
 	}
 	else {
+		sdd_deref(dst->sdd, sisyphus);
 		dst->sdd = sdd_manager_false(sisyphus);
 //		printf("  [Sdd set minus] Sdds were equal, so %u := False (@%p)\n", dst->id, dst->sdd);
 	}
 }
 
 static void set_intersect(vset_t dst, vset_t src) {
-//	printf("[set intersect] set %u := %u /\\ %u.\n", dst->id, dst->id, src->id);
+	printf("[set intersect] set %u := %u /\\ %u.\n", dst->id, dst->id, src->id);
 	if (dst->sdd != src->sdd) {
-		dst->sdd = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+		SddNode* conjoined = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+		sdd_set_and_ref(dst, conjoined);
+//		dst->sdd = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
 	}
 	//printf("  [set intersect] now mc = %u", (unsigned int) sdd_model_count(dst->sdd, sisyphus));
 }
@@ -951,16 +1019,20 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 */
 	if (sdd_node_is_false(rel->sdd)) {
 //		printf("  [Sdd set next]  Rel has no models, so exiting.\n");
+		sdd_deref(dst->sdd, sisyphus);
 		dst->sdd = sdd_manager_false(sisyphus);
 		return;
 	}
 
 	//printf("  [Sdd set next] Conjoining...\n");
+	clock_t before = clock();
 	SddNode* conj = sdd_conjoin(src->sdd, rel->sdd, sisyphus);
+	conjoin_time += (double)(clock() - before);
 //	mcSrc = sdd_model_count(conj, sisyphus);
 //	printf("  [Sdd set next]  Conjoined! #conj=%llu\n", mcSrc);
 	if (sdd_node_is_false(conj)) {
 //		printf("  [Sdd set next] No transitions, so exit.\n");
+		sdd_deref(dst->sdd, sisyphus);
 		dst->sdd = sdd_manager_false(sisyphus);
 		return;
 	}
@@ -1008,11 +1080,14 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	}
 	 *
 	 */
+	before = clock();
 	SddNode* existed = sdd_exists_multiple(exists_map, conj, sisyphus);
+	exists_time += (double)(clock() - before);
 //	mcSrc = sdd_model_count(existed, sisyphus);
 	if (sdd_node_is_false(existed)) {
 //		printf("  [Sdd set next]  Existed. No models. Exit.\n");
-		dst->sdd = existed;
+		sdd_deref(dst->sdd, sisyphus);
+		dst->sdd = sdd_manager_false(sisyphus);
 		return;
 	}
 //	printf("  Existed! #conj=%llu\n  [Sdd set next] Renaming...", mcSrc);
@@ -1055,9 +1130,13 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	 */
 
 	SddNode* renamed = sdd_rename_variables(existed, var_map, sisyphus);
-	dst->sdd = renamed;
-	SddNode* renamedZero = sdd_conjoin(renamed, sdd_primes_zero(), sisyphus);
+	sdd_set_and_ref(dst, renamed);
+//	dst->sdd = renamed; // Replaced by sdd_set_and_ref
+	before = clock();
+	//SddNode* renamedZero = sdd_conjoin(renamed, sdd_primes_zero(), sisyphus);
+	debug_time += (double)(clock() - before);
 //	printf("  [Sdd set next]  Renamed! #conj = %llu. Here it is.\n", mcSrc);
+	/* For debugging purposes
 	if (sdd_node_is_false(renamedZero)) {
 		sdd_save_as_dot("relatio.dot", rel->sdd);
 		sdd_save_as_dot("reached.dot", src->sdd);
@@ -1069,6 +1148,7 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 		getchar();
 		return;
 	}
+	*/
 
 	//vset_exposition(dst);
 
@@ -1126,8 +1206,11 @@ static void set_project(vset_t dst, vset_t src) {
 			printf("\n");
 */
 			//printf("\n  [Sdd project] Quantifying the variables...\n");
-			SddNode* proj = sdd_exists_multiple(exists_map, src->sdd, sisyphus);
-			dst->sdd = proj;
+			clock_t before = clock();
+			SddNode* proj = sdd_exists_multiple(exists_map, src->sdd, sisyphus); // Replaced by sdd_set_and_ref
+			exists_time += (double)(clock() - before);
+			sdd_set_and_ref(dst, proj);
+//			dst->sdd = proj;
 			free(exists_map);
 
 			// Save the fact that dst is now defined over the variables of src
@@ -1145,7 +1228,8 @@ static void set_project(vset_t dst, vset_t src) {
 		}
 	}
 	else {
-		dst->sdd = src->sdd;
+		sdd_set_and_ref(dst, src->sdd);
+//		dst->sdd = src->sdd; // Replaced by sdd_set_and_ref
 	}
 }
 
@@ -1180,10 +1264,10 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 	SddNode* dstSdd = sdd_manager_true(sisyphus);
 
 	// Prepare srcSdd
+	clock_t before = clock();
 	int sdd_var;
 	for (int v=0; v<rel_ll->r_k; v++) {
 //		printf("  [Sdd rel add copy] Read variable %i: %i\n", v, rel_ll->r_proj[v]);
-		fflush(stdout);
 		for (int i=0; i<xstatebits; i++) {
 			sdd_var = xstatebits*rel_ll->r_proj[v] + i + 1;
 			srcSdd = sdd_conjoin(srcSdd, getLiteral(sdd_var, src[v] & (1 << i), 0), sisyphus);
@@ -1230,7 +1314,10 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 //	printf("  [Sdd rel add cpy] edge: %llu and %llu. ", sdd_model_count(srcSdd, sisyphus), sdd_model_count(dstSdd, sisyphus));
 	SddNode* src_and_dst = sdd_conjoin(srcSdd, dstSdd, sisyphus);
 //	printf("Ok. |.|=%llu. Add: ", sdd_model_count(src_and_dst, sisyphus));
-	rel->sdd = sdd_disjoin(rel->sdd, src_and_dst, sisyphus);
+//	rel->sdd = sdd_disjoin(rel->sdd, src_and_dst, sisyphus); // Replaced by sdd_set_rel_and_ref
+//	SddNode* disjoin = sdd_disjoin(rel->sdd, src_and_dst, sisyphus);
+	rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+	rel_increment_time += (double)(clock() - before);
 //	printf("Ok.\n"); //[Sdd rel add cpy] Now rel has %llu models.\n", sdd_model_count(rel->sdd, sisyphus));
 }
 
@@ -1389,37 +1476,6 @@ struct sdd_mit_master sdd_get_iterator(vset_t set) {
 
 /* Version 3.0
  */
-void sdd_model_restart(struct sdd_mit_master* mas, Vtree* tree) {
-	struct sdd_model_iterator* it = &(mas->nodes[sdd_vtree_position(tree)]);
-	sdd_get_iterator_rec(mas, it->root, tree);
-	/*
-	it->finished = 0;
-	// it->i = 0; // TODO uncomment this
-
-	if (sdd_vtree_is_leaf(tree)) {
-		if (it->root == 0) {
-			it->i = 0;
-		} else {
-			it->i = (sdd_node_literal(it->root) > 0) ? 1 : 0;
-		}
-		if (it->var_is_used) {
-			SddLiteral var = sdd_vtree_var(tree);
-			unsigned int var_norm = (var-1) / 2;
-			mas->e[var_norm] = it->i;
-		}
-	}
-	else {
-		if (it->root != 0 && sdd_vtree_of(it->root) == tree) {
-			it->i = 0;
-		}
-		//sdd_model_restart(mas, sdd_vtree_left(tree));
-		//sdd_model_restart(mas, sdd_vtree_right(tree));
-	}
-	*/
-}
-
-/* Version 3.0
- */
 void sdd_mit_free(struct sdd_mit_master mas) {
 	free(mas.e);
 	free(mas.nodes);
@@ -1464,6 +1520,7 @@ void sdd_next_model_rec(struct sdd_mit_master* mas, Vtree* tree) {
 		}
 		return;
 	}
+/*
 	SddLiteral tree_hi = vtree_highest_var(tree);
 	SddLiteral tree_lo = vtree_lowest_var(tree);
 	if (it->root != 0 && sdd_node_is_decision(it->root) && sdd_vtree_of(it->root) == tree) {
@@ -1472,15 +1529,17 @@ void sdd_next_model_rec(struct sdd_mit_master* mas, Vtree* tree) {
 	else {
 		//printf("  [Sdd next model] Node %li|%li\n", tree_lo, tree_hi);
 	}
+*/
 	sdd_next_model_rec(mas, sdd_vtree_right(tree));
 	SddLiteral primeid = sdd_vtree_position(sdd_vtree_right(tree));
-	SddLiteral subid   = sdd_vtree_position(sdd_vtree_left(tree));
 	if (mas->nodes[primeid].finished == 1) {
 		//printf("  [Sdd next model]  Node %li|%li's prime is finished. Trying next sub model.\n", tree_lo, tree_hi);
+		SddLiteral subid   = sdd_vtree_position(sdd_vtree_left(tree));
 		sdd_next_model_rec(mas, sdd_vtree_left(tree));
 		if (mas->nodes[subid].finished == 0) {
 			//printf("  [Sdd next model]  Node %li|%li's sub worked. restarting prime.\n", tree_lo, tree_hi); fflush(stdout);
-			sdd_model_restart(mas, sdd_vtree_right(tree));
+//			sdd_model_restart(mas, sdd_vtree_right(tree));
+			sdd_get_iterator_rec(mas, mas->nodes[primeid].root, sdd_vtree_right(tree));
 		}
 		else if (it->root != 0 && sdd_vtree_of(it->root) == tree) {
 			it->i++;
@@ -1508,8 +1567,10 @@ void sdd_next_model_rec(struct sdd_mit_master* mas, Vtree* tree) {
 /* Version 3.0
  */
 void sdd_next_model(struct sdd_mit_master* mas) {
+	clock_t before = clock();
 	sdd_next_model_rec(mas, sdd_manager_vtree(sisyphus));
 	mas->finished = mas->nodes[sdd_vtree_position(sdd_manager_vtree(sisyphus))].finished;
+	sdd_enumerate_time += (double)(clock() - before);
 }
 
 // A short set enumerator for sets with 1 variable
@@ -1544,6 +1605,7 @@ void small_enum(vset_t src) {
 		}
 		printf(")\n    ");
 	}
+	sdd_mit_free(mas);
 	printf(" }");
 	if (n != mc) {
 		printf("\n\n  That's strange. Enumerated %llu models out of %llu.\n", n, mc);
@@ -1557,7 +1619,9 @@ void small_enum(vset_t src) {
  */
 static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context) {
 	static unsigned int ncalls = 0; ncalls++;
-	SddModelCount src_mc = set_count_exact(src);
+	clock_t before_debug = clock();
+//	SddModelCount src_mc = set_count_exact(src);
+	debug_time += (double)(clock() - before_debug);
 //	printf("[Sdd rel update %u] src = set %u (# = %llu), k=%i rel=%u\n", ncalls, src->id, src_mc, src->k, dst->id);	fflush(stdout);
 //	vrel_exposition(dst);
 	if (sdd_node_is_false(src->sdd)) {
@@ -1581,6 +1645,8 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 	//     Add the new states to dst
 	if (sdd_node_is_decision(root)) {
 		//printf("  [rel update] Node is decision.\n");
+		clock_t before = clock();
+		rel_update_smart_temp = sdd_manager_false(sisyphus);
 		struct sdd_mit_master mas;
 		for (mas = sdd_get_iterator(src); mas.finished == 0; sdd_next_model(&mas)) {
 			//printf("  [rel update] Another model: ");
@@ -1601,24 +1667,23 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 					e[i] |= d;
 				}
 			}
-			/* -- Failed hypothesis: pass full state vector to cb
-			for (int i=0; i<src->dom->vectorsize; i++) {
-				for (int b=0; b<xstatebits; b++) {
-					d = (it->e[xstatebits*i + b]) << b;
-					e[i] |= d;
-				}
-			}
-			 */
-			//printf("  [rel update] e = ");
+/*
+			printf("  [rel update] e = ");
 			for (int i=0; i<rel_ll->r_k; i++) {
-			//	printf(" %i", e[i]);
+				printf(" %i", e[i]);
 			}
-			//printf("\n");
+			printf("\n");
+*/
 			cb(dst, context, e);
 			//printf("  [rel update] Did the callback. Now relation has %llu models.\n", sdd_model_count(dst->sdd, sisyphus));
 			//scanf("%s", word);
 		}
 		sdd_mit_free(mas);
+		if (!sdd_node_is_false(rel_update_smart_temp)) {
+			SddNode* disjoin = sdd_disjoin(dst->sdd, rel_update_smart_temp, sisyphus);
+			sdd_set_rel_and_ref(dst, disjoin);
+		}
+		rel_update_time += (double)(clock() - before);
 //		printf("  [rel update] End of models.\n");
 		//sdd_mit_free(it); // TODO uncomment this to free the data structure
 	}
@@ -1711,8 +1776,8 @@ void ltsmin_initialise_sdd(int vectorsize) {
 	// Number of variables needed in Manager:
 	// 2                 * vectorsize            * xstatebits
 	// unprimed+primed     number of integer       bits per integer
-	Vtree* left = sdd_vtree_new(2*vectorsize * xstatebits, "balanced");
-	sisyphus = sdd_manager_new(left);
+	Vtree* balanced = sdd_vtree_new(2*vectorsize * xstatebits, "right");
+	sisyphus = sdd_manager_new(balanced);
 //	sisyphus = sdd_manager_create(2 * vectorsize * xstatebits, 0);
 }
 
