@@ -9,6 +9,10 @@
  *   whereas SDDs number their variables 1...n
  *   This conversion is "hidden" from the calling LTSmin library,
  *   but this will cause a number of headaches
+ *
+ Thm. The non-leaf vtree nodes have a unique `middle' literal, namely
+	  the rightmost literal in its left child,
+	  i.e., the literal on which this node bissects the variable order
  */
 
 #include <vset-lib/vdom_object.h>
@@ -21,24 +25,36 @@
 #include <hre/user.h>
 #include <hre-io/user.h>
 #include <time.h>
+#include "vtree-utils.h"
+#include "vtree-utils.c" // TODO find a way to incorporate this into the Makefiles
 
 //#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
 
-#define smart_rel_update // Whether to do a smart, non-incremental rel_update
+//   ---   Command line options
+static int static_vtree_search = 2;    // Default: Search for a static vtree before execution, starting from right-linear
+static int vtree_integer_config = 1;   // Default: Augmented right-linear
+static int vtree_increment_config = 8; // Default: Use cache, traverse literals backward, integer by integer
+static int sdd_exist_config = 0;       // Default: Make no attempt to improve existential quantification
+static int sdd_separate_rw = 1;        // Default: Do not separate read from write operations, because there seems to be a bug there
+static int vtree_penalty_fn = 3;       // Default: sum of vertical distances read -> write
 
-/* TODO
- * Idea: In rel_update, don't add models to rel one at a time
- *   Instead, collect the new models in a separate SDD called SddNode* new_models
- *   and then once the collection is complete, call
- *   rel = sdd_disjoin( rel, new_model , sisyphus)
- */
+struct poptOption sdd_options[] = {
+	{ "vtree-search", 0, POPT_ARG_INT, &static_vtree_search, 0, "Whether to search for a static Variable Tree before the exploration starts: 0 (no search) 1 (balanced) 2 (right-linear) 3 (left-linear).", "<0|1|2|3>"},
+	{ "vtree-integer", 0, POPT_ARG_INT, &vtree_integer_config, 0, "Variable Tree corresponding to integers. 0 (balanced) 1 (augmened right-linear) 2 (right-linear) 3 (intermediate wrt balanced / RL)", "<0|1|2>"},
+	{ "vtree-increment", 0, POPT_ARG_INT, &vtree_increment_config, 0, "Way to add a relation element: 0 (naive) 1 (batch) 2 (variables left-to-right) 3 (faithful to Vtree)", "<0|1|2|3>"},
+	{ "sdd-exist", 0, POPT_ARG_INT, &sdd_exist_config, 0, "SDD Existential Operator: 0 (defeault, simple) 1 (per integer) 2 (reverse order)", "<0|1|2>"},
+	{ "sdd-rw", 0, POPT_ARG_INT, &sdd_separate_rw, 0, "Refine transitions into read, write and copy dependencies, or not: 0 (default, no separation) 1 (separation)", "<0|1>"},
+	{ "vtree-pen", 0, POPT_ARG_INT, &vtree_penalty_fn, 0, "Choice of Vtree penalty function heuristic during static Vtree search: 0 (sum vertical distances) 1 (sum max distances) 2 (sum read-write) 3 (weighted read-write) 4 (inverse weighted read-write)", "<0|1>"},
+    POPT_TABLEEND
+};
 
 static int xstatebits = 16;  // bits per integer
+const SddSize sdd_gc_threshold_abs = 100000000; // Absolute threshold: 100MB
 unsigned int enum_error = 0; // flag whether enum has gone wrong yet
-const float sdd_gc_threshold = 0.6; // Do SDD garbage collection when more than gc_treshold % of nodes are dead nodes
-const SddSize sdd_gc_threshold_abs = 10000000; // Absolute threshold: 10MB
+const double vtree_search_timeout = 30.0; // 30 seconds for Vtree search
 unsigned int gc_count = 0; // Number of garbage collections
 unsigned int exploration_started = 0; // Whether the first element has been added yet
+clock_t sdd_exploration_start;
 double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
 double union_time   = 0;  // Amount of time used by sdd_disjoin
 double conjoin_time = 0;  // Amount of time used by sdd_conjoin
@@ -46,8 +62,14 @@ double debug_time   = 0;  // Amount of time spent on safety checks and sanity ch
 double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
 double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
 double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
+void* dummy; int dummy_int; // Dummy variables that we use to suppress compiler warnings "Warning: unused parameter"
 
 SddNode* rel_update_smart_temp;
+const unsigned int rel_update_smart_cache_size = 64;
+SddNode** rel_update_smart_cache;
+unsigned int rel_update_smart_i = 0;
+
+unsigned int peak_footprint = 0;
 
 struct vector_domain
 {
@@ -128,6 +150,13 @@ struct vector_set_ll {
 	vset_ll_t next;
 };
 
+// TODO implement this
+// Do and undo functionality
+struct vtree_rotation {
+	SddLiteral dissection_literal;
+	unsigned int direction;
+};
+
 vrel_ll_t first_vrel = 0;
 vrel_ll_t last_vrel = 0;
 vset_ll_t first_vset = 0;
@@ -170,6 +199,7 @@ void add_vset(vset_t set) {
 	for (int i=0; i<set->k; i++) {
 		last_vset->proj[i] = set->proj[i];
 	}
+	last_vset->next = 0;
 }
 
 // Returns the linked-list-relation struct with the given id.
@@ -254,29 +284,43 @@ void vset_set_domain(vset_t dst, vset_t src) {
 	}
 }
 
-// (sdd_greeting_opt: for testing whether command line options work)
-static int sdd_greeting_opt = 0; // Display a friendly greeting upon startup
-
-struct poptOption sdd_options[] = {
-    { "sdd_greeting", 0, POPT_ARG_INT, &sdd_greeting_opt, 0, "Display a friendly greeting upon startup", "<sdd_greeting_opt>"},
-    POPT_TABLEEND
-};
-
 // Our approach uses one SDD manager, which we will call Sisyphus,
 // after the Greek mythological figure, condemned to endlessly roll a boulder up a hill,
 // only to see all his work undone, and to start over again from the bottom
 SddManager* sisyphus = NULL;
 
-SddSize sdd_memory_footprint() {
-	return 0; // A bit optimistic
+// in bytes
+SddSize sdd_memory_live_footprint() {
+	return (18*sizeof(int) * sdd_manager_live_count(sisyphus) + 2*sizeof(int) * sdd_manager_live_size(sisyphus));
+}
+
+// in bytes
+SddSize sdd_memory_dead_footprint() {
+	return (18*sizeof(int) * sdd_manager_dead_count(sisyphus) + 2*sizeof(int) * sdd_manager_dead_size(sisyphus));
 }
 
 void print_footprint() {
+	double time_elapsed = (double)(clock() - sdd_exploration_start);
+	Warning(info,"\t\tEx\tU\tI\tR\tRi\tenum\telems k\tnodes\tMem kB\tgc\n"
+"\t\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%lu\t%lu\t%lu\t%u\n\t\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\n",
+			exists_time / CLOCKS_PER_SEC, union_time / CLOCKS_PER_SEC,
+			conjoin_time / CLOCKS_PER_SEC, rel_update_time / CLOCKS_PER_SEC, rel_increment_time / CLOCKS_PER_SEC,
+			sdd_enumerate_time / CLOCKS_PER_SEC,
+			sdd_manager_live_size(sisyphus)/1000, sdd_manager_live_count(sisyphus), sdd_memory_live_footprint(), gc_count,
+			100.0f * exists_time / time_elapsed, 100.0f * union_time / time_elapsed,
+			100.0f * conjoin_time / time_elapsed, 100.0f * rel_update_time / time_elapsed, 100.0f* rel_increment_time / time_elapsed,
+			100.0f * sdd_enumerate_time / time_elapsed);
+	/*
 	printf("Time profile: E|U|I|R|Ri|enum\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\n",
 			exists_time / CLOCKS_PER_SEC, union_time / CLOCKS_PER_SEC,
 			conjoin_time / CLOCKS_PER_SEC, rel_update_time / CLOCKS_PER_SEC, rel_increment_time / CLOCKS_PER_SEC,
 			sdd_enumerate_time / CLOCKS_PER_SEC);
-	printf("Memory footprint: gc[%u]\t%lu  |\t%lu\n", gc_count, sdd_manager_live_size(sisyphus) / 4096, sdd_manager_dead_size(sisyphus) / 4096);
+	printf("Time profile: E|U|I|R|Ri|enum\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\n",
+			100.0f * exists_time / time_elapsed, 100.0f * union_time / time_elapsed,
+			100.0f * conjoin_time / time_elapsed, 100.0f * rel_update_time / time_elapsed, 100.0f* rel_increment_time / time_elapsed,
+			100.0f * sdd_enumerate_time / time_elapsed);
+	printf("Memory footprint: gc[%u]\t%lu\t%lu  |\t%lu\n", gc_count,sdd_manager_live_count(sisyphus)/1000, sdd_manager_live_size(sisyphus) / 1024, sdd_manager_dead_size(sisyphus) / 1024);
+	 */
 }
 
 // Returns an SDD in which all primes have value 0
@@ -288,8 +332,596 @@ SddNode* sdd_primes_zero() {
 	return z;
 }
 
+// Left => direction = 0    Right => direction = 1
+Vtree* sdd_vtree_child(Vtree* v, unsigned int direction) {
+	if (v == 0 || sdd_vtree_is_leaf(v)) return 0;
+	return direction ? sdd_vtree_right(v) : sdd_vtree_left(v);
+}
+
+/* Returns the maximum id of any literal below the tree, in 1, ..., n
+ * Does not take into account primed variables
+ */
+SddLiteral vtree_highest_var_nonprimed(Vtree* tree) {
+	if (tree == 0) return 0;
+	else if (sdd_vtree_is_leaf(tree)) {
+//		printf("  [highest var] leaf %li var %li\tparent %li\n", sdd_vtree_position(tree), sdd_vtree_var(tree), sdd_vtree_position(sdd_vtree_parent(tree)));
+		return sdd_vtree_var(tree);
+	}
+	else {
+//		printf("  [highest var] tree %li\tleft %li\tright %li\t\n", sdd_vtree_position(tree), sdd_vtree_position(sdd_vtree_left(tree)),
+//				sdd_vtree_position(sdd_vtree_right(tree))); fflush(stdout);
+		if (sdd_vtree_left(tree) != 0 && sdd_vtree_left(sdd_vtree_left(tree)) == tree) {
+			printf("[highest var] This is truly strange.\n"); fflush(stdout);
+			getchar();
+		}
+		SddLiteral s, p;
+		s = vtree_highest_var_nonprimed(sdd_vtree_left (tree));
+		p = vtree_highest_var_nonprimed(sdd_vtree_right(tree));
+		return s > p ? s : p;
+	}
+}
+
+/* Returns the minimum id of any literal below the tree, in 1, ..., n
+ * Does not take into account primed variables
+ */
+SddLiteral vtree_lowest_var_nonprimed(Vtree* tree) {
+	if (tree == 0) return 0;
+	else if (sdd_vtree_is_leaf(tree)) {
+		return sdd_vtree_var(tree);
+	}
+	else {
+		SddLiteral s, p;
+		s = vtree_lowest_var_nonprimed(sdd_vtree_left (tree));
+		p = vtree_lowest_var_nonprimed(sdd_vtree_right(tree));
+		if (s == -1 || p == -1) return (s > p ? s : p);
+		return s < p ? s : p;
+	}
+}
+
+
+Vtree* get_vtree_by_position(Vtree* root, SddLiteral target) {
+	if (sdd_vtree_is_leaf(root)) {
+		return root;
+	}
+	SddLiteral position = sdd_vtree_position(root);
+	if (position == target) {
+		return root;
+	} else if (position < target) {
+		return get_vtree_by_position(sdd_vtree_right(root), target);
+	} else {
+		return get_vtree_by_position(sdd_vtree_left(root), target);
+	}
+}
+
+/* Returns the unique Vtree node with the specified dissection literal */
+Vtree* get_vtree_by_dissection_literal(Vtree* root, SddLiteral dissection) {
+//	printf("Get tree by dislit %li at node %li\n", dissection, sdd_vtree_position(root)); fflush(stdout);
+	if (sdd_vtree_is_leaf(root)) {
+		printf("Ho it's a leaf! %li\n", sdd_vtree_position(root));
+		return root; // Base case + error handling
+	}
+//	printf("Getting dissection literal of root.\n"); fflush(stdout);
+	SddLiteral dis = vtree_dissection_literal(root);
+	if (dis == dissection) {
+//		printf("Found the target tree: %li\n", sdd_vtree_position(root)); fflush(stdout);
+		return root;
+	}
+	if (dis < dissection) {
+//		printf("Looking right.\n"); fflush(stdout);
+		return get_vtree_by_dissection_literal(sdd_vtree_right(root), dissection);
+	} else {
+//		printf("Looking left.\n");  fflush(stdout);
+		return get_vtree_by_dissection_literal(sdd_vtree_left(root), dissection);
+	}
+}
+
+// Assumes the literals are sorted left-to-right ascending
+Vtree* get_vtree_literal(Vtree* root, SddLiteral target) {
+	if (sdd_vtree_is_leaf(root)) {
+		if (sdd_vtree_var(root) == target) {
+			return root;
+		} else {
+			return 0;
+		}
+	}
+	SddLiteral dis_lit = vtree_dissection_literal(root);
+	if (target <= dis_lit) {
+		return get_vtree_literal(sdd_vtree_left (root), target);
+	} else {
+		return get_vtree_literal(sdd_vtree_right(root), target);
+	}
+/*
+	Vtree* t = get_vtree_literal(sdd_vtree_left(root), target);
+	if (t != 0) return t;
+	else        return get_vtree_literal(sdd_vtree_right(root), target);
+*/
+}
+
+unsigned int vtree_vertical_distance(Vtree* parent, Vtree* child) {
+	if (!sdd_vtree_is_sub(child, parent) || parent == child) {
+		return 0;
+	}
+	unsigned int distance = 0;
+	Vtree* t = parent;
+	do {
+		if (sdd_vtree_is_sub(child, sdd_vtree_left(t))) {
+			t = sdd_vtree_left(t);
+		}
+		else {
+			t = sdd_vtree_right(t);
+		}
+		distance++;
+	} while (t != child);
+	return distance;
+}
+
+void sdd_vtree_rotate_up(Vtree* v, SddManager* manager) {
+	Vtree* parent = sdd_vtree_parent(v);
+	if (parent == 0) return;
+	if (sdd_vtree_left(parent) == v) {
+		sdd_vtree_rotate_right(parent, manager, 0);
+	} else {
+		sdd_vtree_rotate_left(v, manager, 0);
+	}
+}
+
+void sdd_vtree_rotate_down(Vtree* v, SddManager* manager) {
+	Vtree* parent = sdd_vtree_parent(v);
+	if (v == sdd_manager_vtree(manager)) {
+		sdd_vtree_rotate_right(v, manager, 0);
+	} else if (sdd_vtree_left(parent) == v) {
+		sdd_vtree_rotate_right(v, manager, 0);
+	} else {
+		sdd_vtree_rotate_left(v, manager, 0);
+	}
+}
+
+// Assumes that the literals in ascending order from left to right
+// Assumes that v has a parent
+void vtree_make_balanced(Vtree* v, SddManager* manager) {
+	if (sdd_vtree_is_leaf(v)) return;
+	Vtree* parent = sdd_vtree_parent(v);
+	SddLiteral parent_dis = vtree_dissection_literal(parent);
+	unsigned int direction = (v == sdd_vtree_right(parent));
+	SddLiteral low  = vtree_lowest_var_nonprimed (v);
+	SddLiteral high = vtree_highest_var_nonprimed(v);
+	SddLiteral middle = low + (high - low) / 2;
+	Vtree* intended_root = get_vtree_by_dissection_literal(v, middle);
+	while (sdd_vtree_child(parent, direction) != intended_root) {
+		sdd_vtree_rotate_up(intended_root, manager);
+		intended_root = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), middle);
+		parent = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), parent_dis);
+	}
+	vtree_make_balanced(sdd_vtree_left(intended_root), manager);
+	vtree_make_balanced(sdd_vtree_right(intended_root), manager);
+}
+
+void vtree_make_right_linear(Vtree* v, SddManager* manager) {
+	if (sdd_vtree_is_leaf(v)) return;
+	if (sdd_vtree_is_leaf(sdd_vtree_left(v)) && sdd_vtree_is_leaf(sdd_vtree_right(v))) return; // Done
+	Vtree* parent = sdd_vtree_parent(v);
+	SddLiteral parent_dis = vtree_dissection_literal(parent);
+	unsigned int direction = (v == sdd_vtree_right(parent));
+	SddLiteral low  = vtree_lowest_var_nonprimed (v);
+	Vtree* intended_node = get_vtree_by_dissection_literal(v, low);
+	while (sdd_vtree_child(parent, direction) != intended_node) {
+		sdd_vtree_rotate_up(intended_node, manager);
+		intended_node = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), low);
+		parent = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), parent_dis);
+	}
+	vtree_make_right_linear(sdd_vtree_right(intended_node), manager);
+}
+
+void vtree_make_augmented_right_linear(Vtree* v, SddManager* manager) {
+	if (sdd_vtree_is_leaf(v)) return;
+	if (sdd_vtree_is_leaf(sdd_vtree_left(v)) && sdd_vtree_is_leaf(sdd_vtree_right(v))) return; // Done
+	Vtree* parent = sdd_vtree_parent(v);
+	SddLiteral parent_dis = vtree_dissection_literal(parent);
+	unsigned int direction = (v == sdd_vtree_right(parent));
+	SddLiteral low  = vtree_lowest_var_nonprimed (v);
+//	SddLiteral high = vtree_highest_var_nonprimed(v);
+//	printf("[augmented right] Node %li | %li.\n", low, high); fflush(stdout);
+	SddLiteral firstPair = low + 1;
+	Vtree* intended_node = get_vtree_by_dissection_literal(v, firstPair);
+	while (sdd_vtree_child(parent, direction) != intended_node) {
+		sdd_vtree_rotate_up(intended_node, manager);
+		intended_node = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), firstPair);
+		parent = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), parent_dis);
+	}
+	vtree_make_augmented_right_linear(sdd_vtree_right(intended_node), manager);
+}
+
+void vtree_make_right_balanced(Vtree* v, unsigned int order, SddManager* manager) {
+	if (sdd_vtree_is_leaf(v)) return;
+	if (sdd_vtree_is_leaf(sdd_vtree_left(v)) && sdd_vtree_is_leaf(sdd_vtree_right(v))) return; // Done
+	SddLiteral low  = vtree_lowest_var_nonprimed (v);
+	SddLiteral high = vtree_highest_var_nonprimed(v);
+//	printf("[augmented right] Node %li | %li.\n", low, high); fflush(stdout);
+	SddLiteral firstPair = low + order;
+	if (high <= firstPair) return;
+	Vtree* parent = sdd_vtree_parent(v);
+	SddLiteral parent_dis = vtree_dissection_literal(parent);
+	unsigned int direction = (v == sdd_vtree_right(parent));
+	Vtree* intended_node = get_vtree_by_dissection_literal(v, firstPair);
+	while (sdd_vtree_child(parent, direction) != intended_node) {
+		sdd_vtree_rotate_up(intended_node, manager);
+		intended_node = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), firstPair);
+		parent = get_vtree_by_dissection_literal(sdd_manager_vtree(sisyphus), parent_dis);
+	}
+//	vtree_make_balanced      (sdd_vtree_left(intended_node));
+	vtree_make_augmented_right_linear(sdd_vtree_right(intended_node), manager);
+	vtree_make_right_balanced(sdd_vtree_right(intended_node), order, manager);
+}
+
+/* Make the specified target into an integer,
+ * using the user-specified way (option vtree-integer)
+ */
+void vtree_make_integer(Vtree* target) {
+	switch (vtree_integer_config) {
+	case 1:
+		vtree_make_augmented_right_linear(target, sisyphus); break;
+	case 2:
+		vtree_make_right_linear(target, sisyphus); break;
+	case 3:
+		vtree_make_right_balanced(target, 15, sisyphus); break;
+	case 0:
+	default:
+		vtree_make_balanced(target, sisyphus); break;
+	}
+}
+
+/* Given a Vtree whose leaves represent the integers of the program,
+ *   "fold out" each integer in the tree, to obtain a "bit-blasted" tree,
+ *   representing all bits of the program
+ * Input:  A Vtree over dom->vectorsize variables
+ * Output: A Vtree over dom->vectorsize * xstatebits variables
+ *
+ * Thm. Rightmost literal of (left child) * 2 - 1 == sdd_vtree_position(tree)
+ *
+ *    ***   Usage of Vtree rotations   ***
+ *    Rotating a node RIGHT will diminish the set of variables which it spans
+ *    Rotating a node LEFt  will increase the set of variables which it spans
+ *    In particular
+ *    Let Span(x,t) be the span of node x at time t.
+ *    From t=0 to t=1, the node x is rotated right. Then
+ *    Span(x,1) = Span(right(left(x)),0) + Span(right(x),0)
+ *    If, instead, the node x is rotated left, then
+ *    Span(x,1) = Span(parent(x),0)
+ *    This is done so that left/right rotating are each other's inverse
+ */
+void vtree_from_integer_tree(Vtree* tree_int, SddManager* manager_int) {
+	Vtree* root = sdd_manager_vtree(sisyphus);
+//	printf("[vtree from integer] integer position: %li\n", sdd_vtree_position(tree_int));
+	SddLiteral dissection_lit_root = 2 * xstatebits * vtree_dissection_literal(tree_int);
+	Vtree** root_location = sdd_vtree_location(root, sisyphus);
+	Vtree* parent;
+
+	if (sdd_vtree_is_leaf(tree_int)) {
+		// Make this integer right-linear ? Make it balanced? Leave it up to the user.
+//		printf("[vtree from integer]   Uh oh, reached a leaf.\n");
+		// First, find the right Vtree node.
+		Vtree* int_parent = sdd_vtree_parent(tree_int);
+		SddLiteral int_parent_dis = 2 * xstatebits * vtree_dissection_literal(int_parent);
+		parent = get_vtree_by_dissection_literal(root, int_parent_dis);
+		Vtree* node;
+		if (tree_int == sdd_vtree_left(int_parent)) {
+			node = sdd_vtree_left(parent);
+		} else {
+			node = sdd_vtree_right(parent);
+		}
+		// Now the root of the integer in the bit-tree is known:  node
+		vtree_make_integer(node);
+	} else if (tree_int == sdd_manager_vtree(manager_int)) { // tree_int is the root
+		// Find the intended root
+//		printf("Root of tree: %li. Getting intended root.\n", sdd_vtree_position(root)); fflush(stdout);
+		Vtree* intended_root = get_vtree_by_dissection_literal(root, dissection_lit_root);
+//		printf("Got intended root: %li.\n", sdd_vtree_position(intended_root)); fflush(stdout);
+		while (root != intended_root) {
+			sdd_vtree_rotate_up(intended_root, sisyphus);
+			root = *root_location;
+//			printf("New root: %li. Getting intended root pointer.\n", sdd_vtree_position(root));
+			intended_root = get_vtree_by_dissection_literal(root, dissection_lit_root);
+//			printf("Got intended root pointer: %li.\n", sdd_vtree_position(intended_root));
+		}
+
+		vtree_from_integer_tree(sdd_vtree_left (tree_int), manager_int);
+		vtree_from_integer_tree(sdd_vtree_right(tree_int), manager_int);
+//		sdd_vtree_save_as_dot("after-rotation.dot", root);
+	}
+	else {
+//		printf("  [vtree from integer] Child %li\n", sdd_vtree_position(tree_int));
+		// tree_int is not the root of the integer template tree
+		Vtree* intended_node = get_vtree_by_dissection_literal(root, dissection_lit_root);
+		parent            = sdd_vtree_parent(intended_node);
+		SddLiteral parent_dis     = vtree_dissection_literal(parent);
+		SddLiteral intended_parent_dis = vtree_dissection_literal(sdd_vtree_parent(tree_int)) * 2 * xstatebits;
+//		SddLiteral low, high;
+		while (parent_dis != intended_parent_dis) {
+			sdd_vtree_rotate_up(intended_node, sisyphus);
+			intended_node = get_vtree_by_dissection_literal(root, dissection_lit_root);
+			parent = sdd_vtree_parent(intended_node);
+			parent_dis = vtree_dissection_literal(parent);
+//			low = vtree_lowest_var_nonprimed(intended_node);
+//			high = vtree_highest_var_nonprimed(intended_node);
+//			printf("  [vtree from integer] Rotated\t%li | %li.\n", low, high);
+		}
+		vtree_from_integer_tree(sdd_vtree_left (tree_int), manager_int);
+		vtree_from_integer_tree(sdd_vtree_right(tree_int), manager_int);
+	}
+}
+
+unsigned int vtree_penalty_0(Vtree* tree) {
+	unsigned int penalty = 0;
+	Vtree* lca; Vtree* v1_vtree; Vtree* v2_vtree;
+	unsigned int vdist; // TODO refactor to vtree_distance(v1,v2)
+	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
+		for (int v1=0; v1<rel->r_k-1; v1++) {
+		for (int v2=v1+1; v2<rel->r_k; v2++) {
+			v1_vtree = get_vtree_literal(tree, rel->r_proj[v1] + 1);
+			v2_vtree = get_vtree_literal(tree, rel->r_proj[v2] + 1);
+			lca = sdd_vtree_lca(v1_vtree, v2_vtree, tree);
+			penalty += vtree_vertical_distance(lca, v1_vtree);
+			penalty += vtree_vertical_distance(lca, v2_vtree);
+		}
+		}
+	}
+
+	return penalty;
+}
+
+unsigned int vtree_penalty_1(Vtree* tree) {
+	unsigned int pen = 0;
+	Vtree* lca; Vtree* v1_vtree; Vtree* v2_vtree;
+	unsigned int v1_dist, v2_dist, vdist_max;
+	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
+		// Compute the penalty
+		vdist_max = 0;
+		for (int v1=0; v1<rel->r_k-1; v1++) {
+		for (int v2=v1+1; v2<rel->r_k; v2++) {
+//			printf("Getting Vtree node of literal %lu.\n", rel->r_proj[v1] + 1); fflush(stdout);
+			v1_vtree = get_vtree_literal(tree, rel->r_proj[v1] + 1);
+//			printf("Getting Vtree node of literal %lu.\n", rel->r_proj[v2] + 1); fflush(stdout);
+			v2_vtree = get_vtree_literal(tree, rel->r_proj[v2] + 1);
+//			printf("Getting lca.\n"); fflush(stdout);
+			lca = sdd_vtree_lca(v1_vtree, v2_vtree, tree);
+//			printf("Got lca. Getting vertical distance.\n"); fflush(stdout);
+			v1_dist = vtree_vertical_distance(lca, v1_vtree);
+//			printf("Got one vertical distance.\n"); fflush(stdout);
+			v2_dist = vtree_vertical_distance(lca, v2_vtree);
+			if (v1_dist > vdist_max) vdist_max = v1_dist;
+			if (v2_dist > vdist_max) vdist_max = v2_dist;
+		}
+		}
+		pen += vdist_max;
+	}
+	return pen;
+}
+
+unsigned int vtree_penalty_2(Vtree* tree) {
+	unsigned int penalty = 0;
+	Vtree* lca; Vtree* v1_vtree; Vtree* v2_vtree;
+	unsigned int vdist; // TODO refactor to vtree_distance(v1,v2)
+	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
+		for (int v1=0; v1<rel->r_k; v1++) {
+		for (int v2=0; v2<rel->w_k; v2++) {
+			v1_vtree = get_vtree_literal(tree, rel->r_proj[v1] + 1);
+			v2_vtree = get_vtree_literal(tree, rel->w_proj[v2] + 1);
+			lca = sdd_vtree_lca(v1_vtree, v2_vtree, tree);
+			penalty += vtree_vertical_distance(lca, v1_vtree);
+			penalty += vtree_vertical_distance(lca, v2_vtree);
+		}
+		}
+	}
+
+	return penalty;
+}
+
+// Penalty for write->read dependencies is worse than for read->write dependencies
+unsigned int vtree_penalty_3(Vtree* tree) {
+	unsigned int penalty = 0;
+	Vtree* lca; Vtree* v1_vtree; Vtree* v2_vtree;
+	unsigned int vdist;
+	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
+		for (int v1=0; v1<rel->r_k; v1++) {
+		for (int v2=0; v2<rel->w_k; v2++) {
+			v1_vtree = get_vtree_literal(tree, rel->r_proj[v1] + 1);
+			v2_vtree = get_vtree_literal(tree, rel->w_proj[v2] + 1);
+			lca = sdd_vtree_lca(v1_vtree, v2_vtree, tree);
+			vdist = vtree_vertical_distance(lca, v1_vtree) + vtree_vertical_distance(lca, v2_vtree);
+			if (rel->r_proj[v1] <= rel->w_proj[v2])  {
+				penalty += vdist;
+			} else {
+				penalty += 3 * vdist;
+			}
+		}
+		}
+	}
+
+	return penalty;
+}
+
+// Penalty for read->write dependencies is worse than for write->read dependencies
+unsigned int vtree_penalty_4(Vtree* tree) {
+	unsigned int penalty = 0;
+	Vtree* lca; Vtree* v1_vtree; Vtree* v2_vtree;
+	unsigned int vdist;
+	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
+		for (int v1=0; v1<rel->r_k; v1++) {
+		for (int v2=0; v2<rel->w_k; v2++) {
+			v1_vtree = get_vtree_literal(tree, rel->r_proj[v1] + 1);
+			v2_vtree = get_vtree_literal(tree, rel->w_proj[v2] + 1);
+			lca = sdd_vtree_lca(v1_vtree, v2_vtree, tree);
+			vdist = vtree_vertical_distance(lca, v1_vtree) + vtree_vertical_distance(lca, v2_vtree);
+			if (rel->r_proj[v1] <= rel->w_proj[v2])  {
+				penalty += 3 * vdist;
+			} else {
+				penalty += vdist;
+			}
+		}}
+	}
+	return penalty;
+}
+
+unsigned int vtree_penalty(Vtree* tree) {
+	switch (vtree_penalty_fn) {
+	case 1:  return vtree_penalty_1(tree);
+	case 2:  return vtree_penalty_2(tree);
+	case 3:  return vtree_penalty_3(tree);
+	case 4:  return vtree_penalty_4(tree);
+	case 0:
+	default: return vtree_penalty_0(tree);
+	}
+}
+
+void vtree_apply_random_rotation(Vtree* root, SddManager* manager) {
+	// Choose an eligible vtree node uniformly at random, and apply rotation upwards, if applicable
+	// A vtree node is "eligible" for an upwards rotation if
+	//   1) it is not a leaf and
+	//   2) not the root
+	//   2) its right (left) child is not a leaf
+	// Count the eligible nodes
+	if(sdd_manager_var_count(manager) <= 2) return;
+	unsigned int nEligibleNodes = sdd_manager_var_count(manager) - 2;
+	unsigned int targetDissectionLiteral = rand() % nEligibleNodes;
+	Vtree* targetNode = get_vtree_by_dissection_literal(root, targetDissectionLiteral);
+	if (targetNode == root) {
+		// quick fix
+		if (!sdd_vtree_is_leaf(sdd_vtree_left(root))) {
+			targetNode = sdd_vtree_left(root);
+		} else {
+			targetNode = sdd_vtree_right(root);
+		}
+	}
+	sdd_vtree_rotate_up(targetNode, manager);
+}
+
+Vtree* initial_integer_tree() {
+	switch (static_vtree_search) {
+		case 2: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "right"); break;
+		case 3: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "left"); break;
+		case 1:
+		default: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "balanced"); break;
+	}
+}
+
 void find_static_vtree() {
 	printf("Finding static vtree.\n");
+	clock_t before = clock();
+	Vtree* tree_int = initial_integer_tree();
+	SddManager* manager_int = sdd_manager_new(tree_int);
+	// This manager contains one node for each integer variable of the program.
+	// It is a "draft" tree.
+
+	// Greedy search for best vtree
+	const unsigned int budget = 3*sdd_manager_var_count(manager_int);
+	unsigned int penalty_current, penalty_min, penalty;
+	SddLiteral dis_min;
+	Vtree* target; Vtree* parent;
+	penalty_current = vtree_penalty(tree_int);
+	for (unsigned int i=0; i<budget; i++) {
+		if ((clock() - before) / CLOCKS_PER_SEC > vtree_search_timeout) break;
+		penalty_min = penalty_current;
+		for (SddLiteral v=1; v < sdd_manager_var_count(manager_int) - 1; v++) {
+			if ((clock() - before) / CLOCKS_PER_SEC > vtree_search_timeout) break;
+//			printf("Start search %i %li\n", i, v); fflush(stdout);
+			target = get_vtree_by_dissection_literal(tree_int, v);
+//			printf("Got the target: %lu.\n", sdd_vtree_position(target)); fflush(stdout);
+//			tree_int = sdd_manager_vtree(manager_int);
+//			printf("Got the root: %lu.\n", sdd_vtree_position(tree_int)); fflush(stdout);
+			parent = sdd_vtree_parent(target);
+			if (parent != 0) {
+//			if (target == sdd_manager_vtree(manager_int)) continue;
+//				printf("Getting parent.\n"); fflush(stdout);
+//				printf("Got parent: %p\n", parent); fflush(stdout);
+				if (target == sdd_vtree_left(parent)) {
+//					printf("Rotating right..."); fflush(stdout);
+					sdd_vtree_rotate_right(parent, manager_int, 0);
+//					printf("Done.\n"); fflush(stdout);
+					tree_int = sdd_manager_vtree(manager_int);
+					penalty = vtree_penalty(tree_int);
+//					 Undo the rotation
+					sdd_vtree_rotate_left(parent, manager_int, 0);
+					tree_int = sdd_manager_vtree(manager_int);
+				} else {
+//					printf("Rotating left..."); fflush(stdout);
+					sdd_vtree_rotate_left(target, manager_int, 0);
+//					printf("Done.\n");
+					tree_int = sdd_manager_vtree(manager_int);
+					penalty = vtree_penalty(tree_int);
+//					printf("Rotating right..."); fflush(stdout);
+					sdd_vtree_rotate_right(target, manager_int, 0);
+					tree_int = sdd_manager_vtree(manager_int);
+//					printf("Done.\n"); fflush(stdout);
+				}
+				// Save the stats
+				if (penalty < penalty_min) {
+//					printf("Found a better Vtree by rotating %lu yielding %u\n", dis_min, penalty); fflush(stdout);
+					dis_min = v;
+					penalty_min = penalty;
+				}
+			}
+				/*
+			if (target != sdd_manager_vtree(manager_int)) {
+//				Do the rotation
+				printf("Rotating up... "); fflush(stdout);
+				sdd_vtree_rotate_up(target, manager_int);
+				printf("Done.\n"); fflush(stdout);
+//				Compute the penalty
+				penalty = penalty_1(tree_int);
+//				Undo the rotation
+				printf("Rotating down... "); fflush(stdout);
+				target = get_vtree_by_dissection_literal(tree_int, v);
+				sdd_vtree_rotate_down(target, manager_int);
+				printf("Done.\n"); fflush(stdout);
+
+				if (penalty < penalty_min) {
+					printf("Found a better Vtree.\n");
+					dis_min = v;
+					penalty_min = penalty;
+				}
+			}
+				 */
+		}
+		// If an improvement is found
+		if (penalty_min < penalty_current) {
+			// Perform the best operation
+			printf("Found an improvement: Rotate %li up for %u penalty. Implementing improvement.\n", dis_min, penalty_min);
+			tree_int = sdd_manager_vtree(manager_int);
+			target = get_vtree_by_dissection_literal(tree_int, dis_min);
+			sdd_vtree_rotate_up(target, manager_int);
+//			printf("Implemented improvement.\n"); fflush(stdout);
+			tree_int = sdd_manager_vtree(manager_int);
+			penalty_current = penalty_min;
+		} else {
+			printf("No improvement is possible with local rotations.\n"); fflush(stdout);
+			break; // No improvement possible; terminate
+		}
+	}
+
+	// Convert the "draft" tree with integer-labeled leaves to
+	//   a larger one with bit-labeled leaves
+	vtree_from_integer_tree(sdd_manager_vtree(manager_int), manager_int);
+}
+
+/* This function is called once, when the exploration is about to begin
+ */
+void sdd_initialise_given_rels() {
+	printf("initialise given rels.\n");  fflush(stdout);
+	if (exploration_started) return;
+	exploration_started = 1;
+	Vtree* tree = sdd_vtree_new(2 * xstatebits * first_vset->set->dom->vectorsize, "right");
+	sisyphus = sdd_manager_new(tree);
+	if (static_vtree_search) {
+		find_static_vtree(); // TODO uncomment when finding static vtree is available
+	}
+	// Give all the vsets and rels empty SDDs relative to sisyphus
+	for (vset_ll_t set = first_vset; set != 0; set = set->next) {
+		set->set->sdd = sdd_manager_false(sisyphus);
+	}
+	for (vrel_ll_t rel = first_vrel; rel != 0; rel = rel->next) {
+		rel->rel->sdd = sdd_manager_false(sisyphus);
+	}
+	printf("SDD Variable Tree and Manager are initialised..\n"); fflush(stdout);
 }
 
 static SddModelCount set_count_exact(vset_t set) {
@@ -361,8 +993,8 @@ unsigned int sdd_literal_unprimed_index(SddNode* x) {
 }
 
 // Returns an SDD representing the literal litId (with litId in 1...n)
-SddNode* getLiteral(int litId, unsigned int value, unsigned int primed) {
-	int lit = litId > 0 ? litId : -litId;
+SddNode* getLiteral(SddLiteral litId, unsigned int value, unsigned int primed) {
+	SddLiteral lit = litId > 0 ? litId : -litId;
 	lit = primed ? 2*litId : 2*litId - 1;
 	lit = value ? lit : -lit;
 	return sdd_manager_literal(lit ,sisyphus);
@@ -383,10 +1015,14 @@ SddNode* sdd_getCubeLiterals(int* literals, unsigned int nVars) {
 }
 
 void sdd_set_and_ref(vset_t set, SddNode* S) {
+//	printf("[sdd set and ref] start  set %u  S=%p\n", set->id, S); fflush(stdout);
 	sdd_ref(S, sisyphus);
+//	printf("[sdd set and ref] Referenced.\n"); fflush(stdout);
 	sdd_deref(set->sdd, sisyphus);
+//	printf("[sdd set and ref] Dereferenced.\n"); fflush(stdout);
 	set->sdd = S;
-	//sdd_manager_garbage_collect(sisyphus);
+	unsigned int fp = sdd_memory_live_footprint();
+	if (fp > peak_footprint) peak_footprint = fp;
 	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
 		sdd_manager_garbage_collect(sisyphus);
 //		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
@@ -399,7 +1035,9 @@ void sdd_set_rel_and_ref(vrel_t rel, SddNode* R) {
 	sdd_ref(R, sisyphus);
 	sdd_deref(rel->sdd, sisyphus);
 	rel->sdd = R;
-	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
+	unsigned int fp = sdd_memory_live_footprint();
+	if (fp > peak_footprint) peak_footprint = fp;
+	if (sdd_memory_dead_footprint() > sdd_gc_threshold_abs) {
 		sdd_manager_garbage_collect(sisyphus);
 //		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
 		gc_count++;
@@ -448,8 +1086,8 @@ void vrel_exposition(vrel_t rel) {
  *   the SDD (!5 & 6) is returned.
  */
 SddNode* sdd_getCube(int* vars, uint8_t* values, unsigned int nVars) {
+//	printf("[Sdd getCube] Making cube of %u vars. Manager has %li vars.\n", nVars, sdd_manager_var_count(sisyphus));
 	SddNode* conj = sdd_manager_true(sisyphus);
-//	printf("[SDD getCube] Making cube of %u vars.\n", nVars);
 //	printf("  [Sdd getCube]  Value: ");
 	for (unsigned int i=0; i<nVars; i++) {
 		//printf("  [SDD getCube] Cubing variable %i = %u.\n", vars[i], values[i]);
@@ -460,13 +1098,7 @@ SddNode* sdd_getCube(int* vars, uint8_t* values, unsigned int nVars) {
 		printf("%u", values[i]);
 */
 		conj = sdd_conjoin(conj, sdd_manager_literal(values[i] ? (vars[i] + 1) : -(vars[i] + 1), sisyphus), sisyphus);
-		//printf("  [SDD getCube] The Sdd after %i literals:\n", i+1);
-		//traverse(conj);
 	}
-//	printf("\n");
-	//printf("\n  [SDD getCube] The SDD:");
-	//traverse(conj);
-//	printf("  [Sdd getCube] Models: %llu\n", sdd_model_count(conj, sisyphus));
 	return conj;
 }
 
@@ -500,10 +1132,15 @@ unsigned int vset_domains_are_equal(vset_t a, vset_t b) {
 
 static vset_t set_create(vdom_t dom, int k, int* proj) {
 	static unsigned int id = 0;
-	//printf("[Sdd set create] id=%u  k = %i.\n", id, k);
+//	printf("[Sdd set create] id=%u  k = %i.\n", id, k); fflush(stdout);
 	vset_t set = (vset_t) malloc(sizeof(struct vector_set));
 	set->dom = dom;
-	set->sdd = sdd_manager_false(sisyphus);
+	if (exploration_started) {
+		set->sdd = sdd_manager_false(sisyphus);
+	}
+	else {
+		set->sdd = 0;
+	}
 	set->k = k;
 	set->id = id;
 	id++;
@@ -614,7 +1251,7 @@ static void set_destroy(vset_t set) {
 
 static vrel_t rel_create_rw(vdom_t dom, int r_k, int* r_proj, int w_k, int* w_proj) {
 	static unsigned int id = 0;
-	/*
+/*
 	printf("[Sdd Relation create] id = %u\n", id);
 	// Output the relation's variables
 	printf("  Relation read: r_k=%i {", r_k);
@@ -625,12 +1262,17 @@ static vrel_t rel_create_rw(vdom_t dom, int r_k, int* r_proj, int w_k, int* w_pr
 	for (int i=0; i<w_k; i++) {
 		printf("%i ", w_proj[i]);
 	}
-	printf("}\n");
-	 */
+	printf("}\n"); fflush(stdout);
+*/
 
 	vrel_t rel = (vrel_t) RTmalloc(sizeof(struct vector_relation));
 	rel->dom = dom;
-	rel->sdd = sdd_manager_false(sisyphus);
+//	rel->sdd = sdd_manager_false(sisyphus);
+	if (exploration_started) {
+		rel->sdd = sdd_manager_false(sisyphus);
+	} else {
+		rel->sdd = 0;
+	}
 	rel->r_k = r_k;
 	rel->w_k = w_k;
 	rel->id = id;
@@ -766,16 +1408,15 @@ static void state_to_cube(vdom_t dom, int k, const int* proj, const int* state, 
 static void set_add(vset_t set, const int* e) {
 	// This function is the first function that is called when exploration starts
 	if (!exploration_started) {
-		find_static_vtree();
-		exploration_started = 1;
+		sdd_initialise_given_rels();
 	}
-//	printf("[Sdd set add] set %u k=%i.\n", set->id, set->k);
-	//printf("  k: %i\n", set->k);
 	if (set->k == -1) {
 		// ???
 		uint8_t cube[set->dom->vectorsize * xstatebits];
 		state_to_cube(set->dom, set->k, set->proj, e, cube);
-		sdd_set_and_ref(set, sdd_disjoin(set->sdd, sdd_getCube(set->state_variables, cube, set->nstate_variables), sisyphus));
+		SddNode* cube_sdd = sdd_getCube(set->state_variables, cube, set->nstate_variables);
+		SddNode* disjoined = sdd_disjoin(set->sdd, cube_sdd, sisyphus);
+		sdd_set_and_ref(set, disjoined);
 	}
 	else {
         // e is a full state vector, but this set only "cares" about a subset of the variables.
@@ -830,7 +1471,13 @@ static int set_is_empty(vset_t set) {
 	}
 	*/
 	print_footprint();
-	return sdd_node_is_false(set->sdd) ? 1 : 0;
+	unsigned int fp = sdd_memory_live_footprint();
+	if (fp > peak_footprint) peak_footprint = fp;
+	if (sdd_node_is_false(set->sdd)) {
+		Warning(info, "Peak %u\n", peak_footprint);
+		return 1;
+	}
+	return 0;
 }
 
 static int set_equal(vset_t set1, vset_t set2) {
@@ -886,14 +1533,22 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 			getchar();
 		}
 	}
+	dummy = cb;
+	dummy = context;
 }
 
 static void set_update(vset_t dst, vset_t src, vset_update_cb cb, void* context) {
 //	printf("[Sdd set update]\n");
+	dummy = dst;
+	dummy = src;
+	dummy = cb;
+	dummy = context;
 }
 
 static void set_example(vset_t set, int* e) {
-//	printf("[Sdd set example]\n");
+	Warning(info, "[Sdd set example] WARNING: NOT IMPLEMENTED\n");
+	dummy = set;
+	dummy = e;
 }
 
 static void set_count(vset_t set, long* nodes, double* elements) {
@@ -901,7 +1556,10 @@ static void set_count(vset_t set, long* nodes, double* elements) {
 	if (nodes != NULL) {
 		// we use 8 in sdd_size(set->sdd) * 8 because that is the size of a (sub,prime) element
 		//*nodes = sdd_count(set->sdd) * 18 * sizeof(unsigned int) + sdd_size(set->sdd) * 8;
-		*nodes = sdd_manager_live_size(sisyphus) * 18 * sizeof(unsigned int) + sdd_manager_live_count(sisyphus) * 2 * sizeof(unsigned int);
+//		*nodes = sdd_manager_live_size(sisyphus) * 18 * sizeof(unsigned int) + sdd_manager_live_count(sisyphus) * 2 * sizeof(unsigned int);
+		unsigned int fp = sdd_memory_live_footprint();
+		if (fp > peak_footprint) peak_footprint = fp;
+		*nodes = peak_footprint;
 	}
 	if (elements != NULL) {
 		SddModelCount mc = set_count_exact(set);
@@ -925,7 +1583,7 @@ static void set_union(vset_t dst, vset_t src) {
 //	printf("[Sdd set union %u]: %u := %u + %u  (mc = %llu vs %llu) (k=%i vs %i)\n", ncalls, dst->id, dst->id, src->id,
 //			set_count_exact(src), set_count_exact(dst), src->k, dst->k);
 //	SddNode* dstSdd = dst->sdd;
-	SddModelCount srcmc = 0, dstmc = 0, unionmc = 0;
+//	SddModelCount srcmc = 0, dstmc = 0, unionmc = 0;
 	if (sdd_node_is_false(dst->sdd)) {
 //		printf("  [Sdd set union] dst is empty.\n");
 		sdd_set_and_ref(dst, src->sdd);
@@ -948,7 +1606,6 @@ static void set_union(vset_t dst, vset_t src) {
 //			printf("  [Sdd set union] Computations tells us the vset domains are not disjoint:\n");
 //			vset_exposition(src);
 //			vset_exposition(dst);
-			SddNode* dstSdd = dst->sdd;
 			clock_t before = clock();
 			SddNode* sdd_union = sdd_disjoin(dst->sdd, src->sdd, sisyphus);
 			union_time += (double)(clock() - before);
@@ -1036,54 +1693,96 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 		dst->sdd = sdd_manager_false(sisyphus);
 		return;
 	}
+//	Perform the Existential Quantification
 
+	vrel_ll_t rel_ll = get_vrel(rel->id);
 	int n = sdd_manager_var_count(sisyphus);
 	int* exists_map = malloc(sizeof(int) * (n + 1)); // TODO free
+	unsigned int sdd_var;
+	SddNode* existed;
 	// Initialise map to zero
 	for (int i=0; i <= n; i++) {
 		exists_map[i] = 0;
 	}
-	// Mark variables read by rel
-	vrel_ll_t rel_ll = get_vrel(rel->id);
-	//printf("  [Sdd set next]  Quantifying %i read variables:", rel_ll->r_k);
-	unsigned int sdd_var;
-	for (int v=0; v<rel_ll->r_k; v++) {
-		//printf(" %i:", rel_ll->r_proj[v]);
-		for (int i=0; i<xstatebits; i++) {
-			sdd_var = 2*(xstatebits*rel_ll->r_proj[v] + i)+1;
-			//printf(" %u", sdd_var);
-			exists_map[sdd_var] = 1;
+	switch( sdd_exist_config ) {
+	case 0:
+		// Mark variables read by rel
+		//printf("  [Sdd set next]  Quantifying %i read variables:", rel_ll->r_k);
+		for (int v=0; v<rel_ll->r_k; v++) {
+			//printf(" %i:", rel_ll->r_proj[v]);
+			for (int i=0; i<xstatebits; i++) {
+				sdd_var = 2*(xstatebits*rel_ll->r_proj[v] + i)+1;
+				//printf(" %u", sdd_var);
+				exists_map[sdd_var] = 1;
+			}
 		}
-	}
-	//printf("\n  [Sdd set next]  Quantifying %i write variables.\n", rel_ll->w_k);
-	// Mark variables written by rel
-	for (int v=0; v<rel_ll->w_k; v++) {
-		for (int i=0; i<xstatebits; i++) {
-			sdd_var = 2*(xstatebits*rel_ll->w_proj[v] + i)+1;
-			exists_map[sdd_var] = 1;
+		//printf("\n  [Sdd set next]  Quantifying %i write variables.\n", rel_ll->w_k);
+		// Mark variables written by rel
+		for (int v=0; v<rel_ll->w_k; v++) {
+			for (int i=0; i<xstatebits; i++) {
+				sdd_var = 2*(xstatebits*rel_ll->w_proj[v] + i)+1;
+				exists_map[sdd_var] = 1;
+			}
 		}
-	}
-/*
-	printf("  [Sdd set next]  Exists map: ");
-	for (int i=0; i <= n; i++) {
-		printf("%i", exists_map[i]);
-		if (i % 16 == 0) printf(" ");
-	}
-	printf("\n");
-*/
-	//printf("  [Sdd set next]  Existing..."); //prompt();
 	/*
-	for (SddLiteral v = 1; v <= n; v += 2) {
-		printf("  [Sdd next set] Existing var %lu...\n", v);
-		dst->sdd = sdd_exists(v, dst->sdd, sisyphus);
-		printf("  [Sdd set next] Existed!\n");
+		printf("  [Sdd set next]  Exists map: ");
+		for (int i=0; i <= n; i++) {
+			printf("%i", exists_map[i]);
+			if (i % 16 == 0) printf(" ");
+		}
+		printf("\n");
+		//printf("  [Sdd set next]  Existing..."); //prompt();
+		for (SddLiteral v = 1; v <= n; v += 2) {
+			printf("  [Sdd next set] Existing var %lu...\n", v);
+			dst->sdd = sdd_exists(v, dst->sdd, sisyphus);
+			printf("  [Sdd set next] Existed!\n");
+		}
+		 */
+		before = clock();
+		existed = sdd_exists_multiple(exists_map, conj, sisyphus);
+		exists_time += (double)(clock() - before);
+		break;
+	//	mcSrc = sdd_model_count(existed, sisyphus);
+	case 1: // integer by integer
+		existed = conj;
+		for (int v=0; v<rel_ll->r_k; v++) {
+			// This iteration, exist away the v-th integer
+			for (int i=0; i<xstatebits; i++) {
+				sdd_var = 2*(xstatebits*rel_ll->r_proj[v] + i)+1;
+				exists_map[sdd_var] = 1;
+			}
+			before = clock();
+			existed = sdd_exists_multiple(exists_map, existed, sisyphus);
+			exists_time += (double)(clock() - before);
+			for (int i=0; i<xstatebits; i++) {
+				sdd_var = 2*(xstatebits*rel_ll->r_proj[v] + i)+1;
+				exists_map[sdd_var] = 0;
+			}
+		}
+		break;
+	case 2:
+		for (int v=rel_ll->r_k-1; v >= 0; v -= 2) {
+			// This iteration, exist away the v-th integer
+			existed = conj;
+			for (int w=0; w<2; w++) {
+				for (int i=0; i<xstatebits; i++) {
+					sdd_var = 2*(xstatebits*rel_ll->r_proj[v+w] + i)+1;
+					exists_map[sdd_var] = 1;
+				}
+			}
+			before = clock();
+			existed = sdd_exists_multiple(exists_map, existed, sisyphus);
+			exists_time += (double)(clock() - before);
+			for (int w=0; w<2; w++) {
+				for (int i=0; i<xstatebits; i++) {
+					sdd_var = 2*(xstatebits*rel_ll->r_proj[v+w] + i)+1;
+					exists_map[sdd_var] = 0;
+				}
+			}
+		}
+		break;
 	}
-	 *
-	 */
-	before = clock();
-	SddNode* existed = sdd_exists_multiple(exists_map, conj, sisyphus);
-	exists_time += (double)(clock() - before);
-//	mcSrc = sdd_model_count(existed, sisyphus);
+
 	if (sdd_node_is_false(existed)) {
 //		printf("  [Sdd set next]  Existed. No models. Exit.\n");
 		sdd_deref(dst->sdd, sisyphus);
@@ -1093,7 +1792,8 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 //	printf("  Existed! #conj=%llu\n  [Sdd set next] Renaming...", mcSrc);
 
 	// Rename the primed variables to unprimed variables
-	SddLiteral* var_map = malloc(sizeof(SddLiteral) * (n + 1)); // TODO free
+//	SddLiteral* var_map = malloc(sizeof(SddLiteral) * (n + 1)); // TODO free
+	SddLiteral var_map[n+1];
 	for (int i=0; i<=n; i++) {
 		var_map[i] = i;
 	}
@@ -1156,7 +1856,11 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 }
 
 static void set_prev(vset_t dst, vset_t src, vrel_t rel, vset_t univ) {
-	printf("[Sdd] prev.\n");
+	Warning(info, "[Sdd set_prev] WARNING: not implemented\n");
+	dummy = dst;
+	dummy = src;
+	dummy = rel;
+	dummy = univ;
 	// TODO
 }
 
@@ -1234,18 +1938,17 @@ static void set_project(vset_t dst, vset_t src) {
 }
 
 static void set_zip(vset_t dst, vset_t src) {
-	printf("[Sdd] Set zip.\n");
+	Warning(info, "[set_zip] Warning: NOT IMPLEMENTED.\n");
+	dummy = dst;
+	dummy = src;
 	// TODO
-}
-
-static void rel_add_act(vrel_t rel, const int* src, const int* dst, const int* cpy, const int act) {
-	printf("[Sdd rel add action]\n");
 }
 
 static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* cpy) {
 //	printf("[Sdd rel add copy] Relation %u add ", rel->id);
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 /*
+	vrel_exposition(rel);
 	for (int i=0; i<rel_ll->r_k; i++) {
 		printf("%i ", src[i]);
 	}
@@ -1254,71 +1957,402 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 		printf("%i ", dst[i]);
 	}
 	printf("  cpy = ");
-	for (int i=0; i<3; i++) {
+	for (int i=0; i<rel_ll->r_k + rel_ll->w_k; i++) {
 		printf("%i ", cpy[i]);
 	}
 	printf("\n");
+	getchar();
 	fflush(stdout);
 */
+	clock_t before = clock();
 	SddNode* srcSdd = sdd_manager_true(sisyphus);
 	SddNode* dstSdd = sdd_manager_true(sisyphus);
+	SddNode* src_and_dst;
+	SddLiteral var;
+	SddNode* x_and_prime;
+	SddNode* integer_sdd;
+	SddNode* copy_literal;
+	int v_r, v_w;
 
-	// Prepare srcSdd
-	clock_t before = clock();
-	int sdd_var;
-	for (int v=0; v<rel_ll->r_k; v++) {
-//		printf("  [Sdd rel add copy] Read variable %i: %i\n", v, rel_ll->r_proj[v]);
-		for (int i=0; i<xstatebits; i++) {
-			sdd_var = xstatebits*rel_ll->r_proj[v] + i + 1;
-			srcSdd = sdd_conjoin(srcSdd, getLiteral(sdd_var, src[v] & (1 << i), 0), sisyphus);
-		}
-	}
-	if (rel_ll->r_k == -1) {
-//		printf("  [Sdd rel add copy] r_k == -1.\n");
-		for (int v=0; v<rel->dom->vectorsize; v++) {
+	switch (vtree_increment_config) {
+	case 0:
+		printf("Please use the option --vtree-increment=1|2|3|4|5|6|7|8.\n");
+		break;
+	case 1:
+		// Prepare srcSdd
+		for (int v=0; v<rel_ll->r_k; v++) {
+	//		printf("  [Sdd rel add copy] Read variable %i: %i\n", v, rel_ll->r_proj[v]);
 			for (int i=0; i<xstatebits; i++) {
-			srcSdd = sdd_conjoin(srcSdd, getLiteral(xstatebits*v+i+1, src[v] & (1 << i), 0), sisyphus);
+				var = xstatebits*rel_ll->r_proj[v] + i + 1;
+				srcSdd = sdd_conjoin(srcSdd, getLiteral(var, src[v] & (1 << i), 0), sisyphus);
 			}
 		}
-	}
-	// Prepare dstSdd
-	for (int v=0; v<rel_ll->w_k; v++) {
-//		printf("  [Sdd rel add copy] Write variable %i: %i\n", v, rel_ll->w_proj[v]);
-//		fflush(stdout);
-		for (int i=0; i<xstatebits; i++) {
-			sdd_var = xstatebits*rel_ll->w_proj[v] + i + 1;
-			dstSdd = sdd_conjoin(dstSdd, getLiteral(sdd_var, dst[v] & (1 << i), 1), sisyphus);
-		}
-	}
-	int w = 0;
-	for (int v=0; v<rel_ll->r_k; v++) {
-		// Invariant: w_proj[w] >= r_proj[v]
-		while (w < rel_ll->w_k && rel_ll->w_proj[w] < rel_ll->r_proj[v]) w++;
-		if (w > rel_ll->w_k || rel_ll->w_proj[w] != rel_ll->r_proj[v]) {
-			// Variable is read but not written, so cover it
+		// Prepare dstSdd
+		//printf("  [Sdd rel add copy] Finished src, dst in cases k != -1"); fflush(stdout);
+		for (int v=0; v<rel_ll->w_k; v++) {
+//			printf("  [Sdd rel add copy] Write variable %i: %i\n", v, rel_ll->w_proj[v]); fflush(stdout);
+			if (cpy && cpy[v]) {
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->w_proj[v] + i + 1;
+					copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+											   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+					dstSdd = sdd_conjoin(dstSdd, copy_literal, sisyphus);
+				}
+			} else {
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->w_proj[v] + i + 1;
+					dstSdd = sdd_conjoin    (dstSdd, getLiteral(var, dst[v] & (1 << i), 1), sisyphus);
+				}
+			}
+/*
 			for (int i=0; i<xstatebits; i++) {
-				sdd_var = xstatebits*rel_ll->r_proj[v] + i + 1;
-				dstSdd = sdd_conjoin(dstSdd, getLiteral(sdd_var, src[v] & (1 << i), 1), sisyphus);
+				var = xstatebits*rel_ll->w_proj[v] + i + 1;
+				if (cpy && cpy[v]) {
+					copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+											   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+					dstSdd = sdd_conjoin(dstSdd, copy_literal, sisyphus);
+				} else {
+					dstSdd = sdd_conjoin    (dstSdd, getLiteral(var, dst[v] & (1 << i), 1), sisyphus);
+				}
+			}
+*/
+//				If this variable is copied, constrain srcSdd???
+		}
+		int w = 0;
+		for (int v=0; v<rel_ll->r_k; v++) {
+			// Invariant: w_proj[w] >= r_proj[v]
+			while (w < rel_ll->w_k && rel_ll->w_proj[w] < rel_ll->r_proj[v]) w++;
+			if (w > rel_ll->w_k || rel_ll->w_proj[w] != rel_ll->r_proj[v]) {
+				// Variable is read but not written, so cover it
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v] + i + 1;
+					dstSdd = sdd_conjoin(dstSdd, getLiteral(var, src[v] & (1 << i), 1), sisyphus);
+				}
 			}
 		}
-	}
-	//printf("  [Sdd rel add copy] Finished src, dst in cases k != -1"); fflush(stdout);
-	if (rel_ll->w_k == -1) {
-		for (int v=0; v<rel->dom->vectorsize; v++) {
-			for (int i=0; i<xstatebits; i++) {
-				dstSdd = sdd_conjoin(dstSdd, getLiteral(xstatebits*v+i+1, dst[v] & (1 << i), 1), sisyphus);
-			}
-		}
-	}
 
-//	printf("  [Sdd rel add cpy] edge: %llu and %llu. ", sdd_model_count(srcSdd, sisyphus), sdd_model_count(dstSdd, sisyphus));
-	SddNode* src_and_dst = sdd_conjoin(srcSdd, dstSdd, sisyphus);
-//	printf("Ok. |.|=%llu. Add: ", sdd_model_count(src_and_dst, sisyphus));
-//	rel->sdd = sdd_disjoin(rel->sdd, src_and_dst, sisyphus); // Replaced by sdd_set_rel_and_ref
-//	SddNode* disjoin = sdd_disjoin(rel->sdd, src_and_dst, sisyphus);
-	rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+	//	printf("  [Sdd rel add cpy] edge: %llu and %llu. ", sdd_model_count(srcSdd, sisyphus), sdd_model_count(dstSdd, sisyphus));
+		src_and_dst = sdd_conjoin(srcSdd, dstSdd, sisyphus);
+	//	printf("Ok. |.|=%llu. Add: ", sdd_model_count(src_and_dst, sisyphus));
+	//	rel->sdd = sdd_disjoin(rel->sdd, src_and_dst, sisyphus); // Replaced by sdd_set_rel_and_ref
+	//	SddNode* disjoin = sdd_disjoin(rel->sdd, src_and_dst, sisyphus);
+		rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+	//	printf("Ok.\n"); //[Sdd rel add cpy] Now rel has %llu models.\n", sdd_model_count(rel->sdd, sisyphus));
+		break;
+	case 2: // left-to-right.
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = 0;
+		v_w = 0;
+		while (v_r < rel_ll->r_k || v_w < rel_ll->w_k) {
+//			printf("[rel add cpy] v_r = %i  v_w = %i\n", v_r, v_w);fflush(stdout);
+			if (v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+//				printf("  Var is both read and written.\n");fflush(stdout);
+				// Variable is both read and written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, src[v_r] & (1 << i), 0), sisyphus);
+					src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+				}
+				v_r++;
+				v_w++;
+			} else if ((v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] < rel_ll->w_proj[v_w]) ||
+					    v_w >= rel_ll->w_k) {
+//				printf(" variable is read but not written.\n");fflush(stdout);
+				// Variable is read but not written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, src[v_r] & (1 << i), 0), sisyphus);
+					src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+				}
+				v_r++;
+			} else {
+				// Variable is written but not read
+//				printf("Variable is written but not read.\n");fflush(stdout);
+				if (cpy && cpy[v_w]) {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						src_and_dst = sdd_conjoin(src_and_dst, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w++;
+			}
+		}
+		rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+		break;
+	case 3: // left-to-right, but conjoin two variables first
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = 0;
+		v_w = 0;
+		while (v_r < rel_ll->r_k || v_w < rel_ll->w_k) {
+			if (v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+				// Variable is both read and written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					src_and_dst = sdd_conjoin(src_and_dst, x_and_prime, sisyphus);
+				}
+				v_r++;
+				v_w++;
+			} else if ((v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] < rel_ll->w_proj[v_w]) ||
+					    v_w >= rel_ll->w_k) {
+				// Variable is read but not written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+					src_and_dst = sdd_conjoin(src_and_dst, x_and_prime, sisyphus);
+				}
+				v_r++;
+			} else {
+				// Variable is written but not read
+				if (cpy && cpy[v_w]) {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						src_and_dst = sdd_conjoin(src_and_dst, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						src_and_dst = sdd_conjoin(src_and_dst, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w++;
+			}
+		}
+		rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+		break;
+	case 4: //left to right, integer by integer
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = 0;
+		v_w = 0;
+		while (v_r < rel_ll->r_k || v_w < rel_ll->w_k) {
+			integer_sdd = sdd_manager_true(sisyphus);
+			if (v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+				// Variable is both read and written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+				v_w++;
+			} else if ((v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] < rel_ll->w_proj[v_w]) ||
+					    v_w >= rel_ll->w_k) {
+				// Variable is read but not written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+			} else {
+				// Variable is written but not read
+				if (cpy && cpy[v_w]) {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						integer_sdd = sdd_conjoin(integer_sdd, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						integer_sdd= sdd_conjoin(integer_sdd, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w++;
+			}
+			src_and_dst = sdd_conjoin(src_and_dst, integer_sdd, sisyphus);
+		}
+		rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+		break;
+	case 6: // same as 4, but add this SDD to a fractionally-bookkept cache
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = 0;
+		v_w = 0;
+		while (v_r < rel_ll->r_k || v_w < rel_ll->w_k) {
+			integer_sdd = sdd_manager_true(sisyphus);
+			if (v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+				// Variable is both read and written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+				v_w++;
+			} else if ((v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] < rel_ll->w_proj[v_w]) ||
+					    v_w >= rel_ll->w_k) {
+				// Variable is read but not written
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+			} else {
+				// Variable is written but not read
+				if (cpy && cpy[v_w]) {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						integer_sdd = sdd_conjoin(integer_sdd, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=0; i<xstatebits; i++) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						integer_sdd= sdd_conjoin(integer_sdd, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w++;
+			}
+			src_and_dst = sdd_conjoin(src_and_dst, integer_sdd, sisyphus);
+		}
+		if (rel_update_smart_i + 1 == rel_update_smart_cache_size) {
+//			 add the list to rel_update_smart_temp
+			for (int b=0; b<6; b++) {
+				for (unsigned int i=0; i<rel_update_smart_cache_size; i += (1 << (b+1))) {
+					rel_update_smart_cache[i] = sdd_disjoin(rel_update_smart_cache[i], rel_update_smart_cache[i+(1<<b)], sisyphus);
+				}
+			}
+			rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, rel_update_smart_cache[0], sisyphus);
+			rel_update_smart_i = 0;
+		}
+		rel_update_smart_cache[rel_update_smart_i] = src_and_dst;
+		rel_update_smart_i++;
+		break;
+	case 7: // Same as 6, but add the bits in reverse order
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = 0;
+		v_w = 0;
+		while (v_r < rel_ll->r_k || v_w < rel_ll->w_k) {
+			integer_sdd = sdd_manager_true(sisyphus);
+			if (v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+				// Variable is both read and written
+				for (int i=xstatebits - 1; i>=0; i--) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+				v_w++;
+			} else if ((v_r < rel_ll->r_k && v_w < rel_ll->w_k && rel_ll->r_proj[v_r] < rel_ll->w_proj[v_w]) ||
+					    v_w >= rel_ll->w_k) {
+				// Variable is read but not written
+				for (int i=xstatebits - 1; i>=0; i--) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r++;
+			} else {
+				// Variable is written but not read
+				if (cpy && cpy[v_w]) {
+					for (int i=xstatebits - 1; i>=0; i--) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						integer_sdd = sdd_conjoin(integer_sdd, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=xstatebits - 1; i>=0; i--) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						integer_sdd= sdd_conjoin(integer_sdd, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w++;
+			}
+			src_and_dst = sdd_conjoin(src_and_dst, integer_sdd, sisyphus);
+		}
+		if (rel_update_smart_i + 1 == rel_update_smart_cache_size) {
+//			 add the list to rel_update_smart_temp
+			for (int b=0; b<6; b++) {
+				for (unsigned int i=0; i<rel_update_smart_cache_size; i += (1 << (b+1))) {
+					rel_update_smart_cache[i] = sdd_disjoin(rel_update_smart_cache[i], rel_update_smart_cache[i+(1<<b)], sisyphus);
+				}
+			}
+			rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, rel_update_smart_cache[0], sisyphus);
+			rel_update_smart_i = 0;
+		}
+		rel_update_smart_cache[rel_update_smart_i] = src_and_dst;
+		rel_update_smart_i++;
+		break;
+	case 8: // Same as 7, but add the integers in reverse order
+		src_and_dst = sdd_manager_true(sisyphus);
+		v_r = rel_ll->r_k-1;
+		v_w = rel_ll->w_k-1;
+		while (v_r >= 0 || v_w >= 0) {
+			integer_sdd = sdd_manager_true(sisyphus);
+			if (v_r >= 0 && v_w >= 0 && rel_ll->r_proj[v_r] == rel_ll->w_proj[v_w]) {
+				// Variable is both read and written
+				for (int i=xstatebits - 1; i>=0; i--) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r--;
+				v_w--;
+			} else if ((v_r >= 0 && v_w >= 0 && rel_ll->r_proj[v_r] > rel_ll->w_proj[v_w]) ||
+					    v_w < 0) {
+				// Variable is read but not written
+				for (int i=xstatebits - 1; i>=0; i--) {
+					var = xstatebits*rel_ll->r_proj[v_r] + i + 1;
+					x_and_prime = sdd_conjoin(getLiteral(var, src[v_r] & (1 << i), 0), getLiteral(var, src[v_r] & (1 << i), 1), sisyphus);
+					integer_sdd = sdd_conjoin(integer_sdd, x_and_prime, sisyphus);
+				}
+				v_r--;
+			} else {
+				// Variable is written but not read
+				if (cpy && cpy[v_w]) {
+					for (int i=xstatebits - 1; i>=0; i--) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+												   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+						integer_sdd = sdd_conjoin(integer_sdd, copy_literal, sisyphus);
+					}
+				} else {
+					for (int i=xstatebits - 1; i>=0; i--) {
+						var = xstatebits*rel_ll->w_proj[v_w] + i + 1;
+						integer_sdd= sdd_conjoin(integer_sdd, getLiteral(var, dst[v_w] & (1 << i), 1), sisyphus);
+					}
+				}
+				v_w--;
+			}
+			src_and_dst = sdd_conjoin(src_and_dst, integer_sdd, sisyphus);
+		}
+		if (rel_update_smart_i + 1 == rel_update_smart_cache_size) {
+//			 add the list to rel_update_smart_temp
+			for (int b=0; b<6; b++) {
+				for (unsigned int i=0; i<rel_update_smart_cache_size; i += (1 << (b+1))) {
+					rel_update_smart_cache[i] = sdd_disjoin(rel_update_smart_cache[i], rel_update_smart_cache[i+(1<<b)], sisyphus);
+				}
+			}
+			rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, rel_update_smart_cache[0], sisyphus);
+			rel_update_smart_i = 0;
+		}
+		rel_update_smart_cache[rel_update_smart_i] = src_and_dst;
+		rel_update_smart_i++;
+		break;
+	case 9:
+		printf("Unfortunately feature vtree-increment=9 is not supported yet.\n");
+		break;
+	}
 	rel_increment_time += (double)(clock() - before);
-//	printf("Ok.\n"); //[Sdd rel add cpy] Now rel has %llu models.\n", sdd_model_count(rel->sdd, sisyphus));
+}
+
+static void rel_add_act(vrel_t rel, const int* src, const int* dst, const int* cpy, const int act) {
+//	printf("[Sdd rel add action]\n");
+	rel_add_cpy(rel, src, dst, cpy);
+	dummy_int = act;
 }
 
 static void rel_add(vrel_t rel, const int* src, const int* dst) {
@@ -1619,9 +2653,9 @@ void small_enum(vset_t src) {
  */
 static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context) {
 	static unsigned int ncalls = 0; ncalls++;
-	clock_t before_debug = clock();
+//	clock_t before_debug = clock();
 //	SddModelCount src_mc = set_count_exact(src);
-	debug_time += (double)(clock() - before_debug);
+//	debug_time += (double)(clock() - before_debug);
 //	printf("[Sdd rel update %u] src = set %u (# = %llu), k=%i rel=%u\n", ncalls, src->id, src_mc, src->k, dst->id);	fflush(stdout);
 //	vrel_exposition(dst);
 	if (sdd_node_is_false(src->sdd)) {
@@ -1640,26 +2674,33 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 	vrel_ll_t rel_ll = get_vrel(dst->id);
 	SddNode* root = src->sdd;
 	int* e = malloc(sizeof(int) * rel_ll->r_k);
+	if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
+		for (unsigned int i=0; i<rel_update_smart_cache_size; i++) {
+			rel_update_smart_cache[i] = sdd_manager_false(sisyphus);
+		}
+	}
 	// For each model of src
 	//     Call the callback to find the new states
 	//     Add the new states to dst
 	if (sdd_node_is_decision(root)) {
 		//printf("  [rel update] Node is decision.\n");
 		clock_t before = clock();
+		int d;
 		rel_update_smart_temp = sdd_manager_false(sisyphus);
 		struct sdd_mit_master mas;
 		for (mas = sdd_get_iterator(src); mas.finished == 0; sdd_next_model(&mas)) {
-			//printf("  [rel update] Another model: ");
+/*
+			printf("  [rel update] Another model: ");
 			for (int i=0; i<src->dom->vectorsize * xstatebits; i++) {
-				//if (i % 16 == 0) printf(" ");
-				//printf("%u", it->e[i] ? 1 : 0);
+				if (i % 16 == 0) printf(" ");
+				printf("%u", it->e[i] ? 1 : 0);
 			}
-			//printf("\n");
+			printf("\n");
+*/
 			// Refactor mas.e to a bit-array
 			for (int i=0; i<rel_ll->r_k; i++) {
-				e[i] = 0;
+				e[i] = 0; // TODO put this in the next loop
 			}
-			int d;
 			for (int i=0; i<rel_ll->r_k; i++) {
 				for (int b=0; b<xstatebits; b++) {
 					d = (mas.e[xstatebits*(rel_ll->r_proj[i])+b]) << b;
@@ -1676,14 +2717,48 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 */
 			cb(dst, context, e);
 			//printf("  [rel update] Did the callback. Now relation has %llu models.\n", sdd_model_count(dst->sdd, sisyphus));
-			//scanf("%s", word);
 		}
 		sdd_mit_free(mas);
-		if (!sdd_node_is_false(rel_update_smart_temp)) {
+		if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
+			if (rel_update_smart_i != 0) {
+				// An update has occurred
+				if (rel_update_smart_i == 1) {
+					clock_t before_inc = clock();
+					rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, rel_update_smart_cache[0], sisyphus);
+					SddNode* disjoin = sdd_disjoin(dst->sdd, rel_update_smart_temp, sisyphus);
+					rel_increment_time += (double)(clock() - before_inc);
+					rel_update_time += (double)(clock() - before);
+					sdd_set_rel_and_ref(dst, disjoin);
+				} else {
+//					 There is still stuff left over in the cache
+//					 add the list to rel_update_smart_temp
+					clock_t before_inc = clock();
+					for (int b=0; b<6; b++) {
+						for (unsigned int i=0; i<rel_update_smart_cache_size; i += (1 << (b+1))) {
+							if (sdd_node_is_false(rel_update_smart_cache[i+(1<<b)])) {
+								continue;
+							}
+							rel_update_smart_cache[i] = sdd_disjoin(rel_update_smart_cache[i], rel_update_smart_cache[i+(1<<b)], sisyphus);
+						}
+					}
+					rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, rel_update_smart_cache[0], sisyphus);
+					SddNode* disjoin = sdd_disjoin(dst->sdd, rel_update_smart_temp, sisyphus);
+					rel_increment_time += (double)(clock() - before_inc);
+					rel_update_time += (double)(clock() - before);
+					sdd_set_rel_and_ref(dst, disjoin);
+				}
+			}
+		}
+		else if (!sdd_node_is_false(rel_update_smart_temp)) {
+			clock_t before_inc = clock();
 			SddNode* disjoin = sdd_disjoin(dst->sdd, rel_update_smart_temp, sisyphus);
+			rel_increment_time += (double)(clock() - before_inc);
+			rel_update_time += (double)(clock() - before);
 			sdd_set_rel_and_ref(dst, disjoin);
 		}
-		rel_update_time += (double)(clock() - before);
+		else {
+			rel_update_time += (double)(clock() - before);
+		}
 //		printf("  [rel update] End of models.\n");
 		//sdd_mit_free(it); // TODO uncomment this to free the data structure
 	}
@@ -1703,11 +2778,19 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 }
 
 static void set_least_fixpoint(vset_t dst, vset_t src, vrel_t _rels[], int rel_count) {
-	printf("[Sdd least fixpoint]\n");
+	Warning(info, "set_least_fixpoint Warning: Not implemented.\n");
+	dummy = dst;
+	dummy = src;
+	dummy = _rels;
+	dummy_int = rel_count;
 }
 
 static void set_least_fixpoint_par(vset_t dst, vset_t src, vrel_t _rels[], int rel_count) {
-	printf("[Sdd least fixpoint parallel]\n");
+	Warning(info, "set_least_fixpoint_par Warning: Not implemented.\n");
+	dummy = dst;
+	dummy = src;
+	dummy = _rels;
+	dummy_int = rel_count;
 }
 
 static void set_reorder() {
@@ -1717,7 +2800,7 @@ static void set_reorder() {
 /* Indicates that our package distinguishes read operations from write operations
  */
 static int separates_rw() {
-	return 0;
+	return sdd_separate_rw; // cmd line paramter
 }
 
 static void dom_set_function_pointers(vdom_t dom) {
@@ -1772,18 +2855,31 @@ static void dom_set_function_pointers(vdom_t dom) {
 }
 
 // initialise sisyphus Sdd Manager
-void ltsmin_initialise_sdd(int vectorsize) {
+void ltsmin_initialise_sdd() {
 	// Number of variables needed in Manager:
 	// 2                 * vectorsize            * xstatebits
 	// unprimed+primed     number of integer       bits per integer
-	Vtree* balanced = sdd_vtree_new(2*vectorsize * xstatebits, "right");
-	sisyphus = sdd_manager_new(balanced);
+	// Initialising sisyphus is now done in sdd_initialise_given_rels()
+//	Vtree* balanced = sdd_vtree_new(2*vectorsize * xstatebits, "balanced");
+//	sisyphus = sdd_manager_new(balanced);
+	sdd_exploration_start = clock();
+	if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
+		rel_update_smart_cache = malloc(sizeof(SddNode*) * rel_update_smart_cache_size);
+	}
+/*
+	if (sdd_greeting_opt) {
+		printf("Friendly greeting to you, SDD user! May succinct represenations be with you.\n");
+	}
+	else {
+		printf("No greeting :-(\n");
+	}
+*/
 //	sisyphus = sdd_manager_create(2 * vectorsize * xstatebits, 0);
 }
 
 vdom_t dom_create(int vectorsize, int* _statebits, int actionbits) {
 //	printf("[dom create]  Creating domain.\n");
-	ltsmin_initialise_sdd(vectorsize);
+	ltsmin_initialise_sdd();
 
 	// Create the domain data structure
 	vdom_t dom = (vdom_t) malloc(sizeof(struct vector_domain));
