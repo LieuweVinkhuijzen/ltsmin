@@ -410,14 +410,8 @@ unsigned int vtree_penalty_6(Vtree* tree) {
 unsigned int vtree_penalty_7(Vtree* tree) {
 	unsigned int penalty = 0;
 	Vtree* v1_vtree; Vtree* v2_vtree;
-	Vtree* lca;
 	unsigned int dist, maxdist;
 	// Initialize lca
-	if (first_vrel->r_k > 0) {
-		lca = first_vrel->r_proj[0];
-	} else {
-		lca = first_vrel->w_proj[0];
-	}
 	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
 		maxdist = 0;
 		for (int v1=0; v1<rel->r_k; v1++) {
@@ -437,22 +431,22 @@ unsigned int vtree_penalty_7(Vtree* tree) {
 // Penalty: Number of literals under the relation's lca
 unsigned int vtree_penalty_8(Vtree* tree) {
 	unsigned int penalty = 0;
-	Vtree* v1_vtree; Vtree* v2_vtree;
+	Vtree* v1_vtree;
 	Vtree* lca;
 	// Initialize lca
 	if (first_vrel->r_k > 0) {
-		lca = first_vrel->r_proj[0];
+		lca = get_vtree_literal(tree, first_vrel->r_proj[0]);
 	} else {
-		lca = first_vrel->w_proj[0];
+		lca = get_vtree_literal(tree, first_vrel->w_proj[0]);
 	}
 	for (vrel_ll_t rel = first_vrel; rel != 0 && rel->next != 0; rel = rel->next) {
 		for (int v=0; v<rel->r_k; v++) {
 			v1_vtree = get_vtree_literal(tree, rel->r_proj[v] + 1);
-			lca = sdd_vtree_lca(lca, v1_vtree);
+			lca = sdd_vtree_lca(lca, v1_vtree, tree);
 		}
 		for (int v=0; v<rel->w_k; v++) {
 			v1_vtree = get_vtree_literal(tree, rel->w_proj[v]+1);
-			lca = sdd_vtree_lca(lca, v1_vtree);
+			lca = sdd_vtree_lca(lca, v1_vtree, tree);
 		}
 		penalty += vtree_variables_count(lca);
 	}
@@ -490,7 +484,7 @@ void find_static_vtree() {
 	// Greedy search for best vtree
 	const unsigned int budget = 3*sdd_manager_var_count(manager_int);
 	unsigned int penalty_current, penalty_min, penalty;
-	struct sdd_vtree_rotation rotation, rotation_best;
+	struct sdd_vtree_rotation rotation;
 	SddLiteral dis_min;
 	Vtree* target; Vtree* parent;
 	penalty_current = vtree_penalty(tree_int);
@@ -519,7 +513,6 @@ void find_static_vtree() {
 			printf("Undid rotation.\n"); fflush(stdout);
 			if (penalty < penalty_min) {
 				dis_min = v;
-				rotation_best = rotation;
 				penalty_min = penalty;
 				printf("Found a better Vtree by rotating %lu yielding %u\n", dis_min, penalty); fflush(stdout);
 			}

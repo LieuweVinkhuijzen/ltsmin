@@ -210,7 +210,7 @@ unsigned int vtree_distance(Vtree* a, Vtree* b) {
 }
 
 struct sdd_vtree_rotation sdd_vtree_rotate_up(Vtree* v, SddManager* manager) {
-	struct sdd_vtree_rotation rotation;
+	struct sdd_vtree_rotation rotation = {.dislit=0, .direction=0, .manager=manager};
 	Vtree* parent = sdd_vtree_parent(v);
 	if (parent == 0) return rotation;
 	if (sdd_vtree_left(parent) == v) {
@@ -222,7 +222,6 @@ struct sdd_vtree_rotation sdd_vtree_rotate_up(Vtree* v, SddManager* manager) {
 		rotation.direction = left;
 		rotation.dislit = vtree_dissection_literal(v);
 	}
-	rotation.manager = manager;
 	return rotation;
 }
 
