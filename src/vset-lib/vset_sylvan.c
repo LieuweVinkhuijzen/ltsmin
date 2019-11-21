@@ -12,6 +12,7 @@
 #include <vset-lib/vdom_object.h>
 #include <sylvan.h>
 #include <sylvan_int.h>
+#include <sylvan_table.h>
 
 static int xstatebits = 16;   // maximum / default bits per integer
 static int xactionbits = 16;  // maximum / default bits per action variable
@@ -21,6 +22,8 @@ static int cachesize = 23;    // initial size of operation cache
 static int maxcachesize = 27; // maximum size of operation cache
 static int granularity = 1;   // caching granularity for Sylvan
 static char* sizes = NULL;    // for setting table sizes in command line
+
+static unsigned long int peak_nodecount = 0; // highest witnessed nodecount at any moment
 
 struct poptOption sylvan_options[] = {
     { "sylvan-bits", 0, POPT_ARG_INT|POPT_ARGFLAG_SHOW_DEFAULT, &xstatebits, 0, "set number of bits per integer in the state vector", "<bits>"},
@@ -485,7 +488,20 @@ set_member(vset_t set, const int* e)
 static int
 set_is_empty(vset_t set)
 {
-    return set->bdd == sylvan_false ? 1 : 0;
+	LACE_ME;
+	sylvan_gc_hook_main(TASK(sylvan_gc_normal_resize));
+//	        sylvan_gc();
+	sylvan_gc_hook_main(TASK(sylvan_gc_aggressive_resize));
+	size_t filled, total;
+	sylvan_table_usage(&filled, &total);
+    if (filled > peak_nodecount) peak_nodecount = filled;
+
+	Warning(info, "BDD Nodes used:\t\t%lu\t%'zu\t%'zu\n", sylvan_nodecount(set->bdd) / 1024, filled / 1024, total / 1024);
+	if (set->bdd == sylvan_false) {
+		Warning(info,"Peak %u\n", peak_nodecount);
+		return 1;
+	}
+	return 0;
 }
 
 /**
@@ -706,7 +722,10 @@ static void
 set_count(vset_t set, long *nodes, double *elements)
 {
     LACE_ME;
-    if (nodes != NULL) *nodes = sylvan_nodecount(set->bdd);
+	size_t filled, total;
+	sylvan_table_usage(&filled, &total);
+    if (filled > peak_nodecount) peak_nodecount = filled;
+    if (nodes != NULL) *nodes = peak_nodecount;
     if (elements != NULL) *elements = (double) sylvan_satcount(set->bdd, set->state_variables);
 }
 
@@ -978,18 +997,18 @@ rel_add_cpy(vrel_t rel, const int *src, const int *dst, const int *cpy)
                 // take copy of read
                 for (int j=sb-1; j>=0; j--) {
                     n--;
-                    BDD low = sylvan_makenode(w_vars[n]+1, dst_bdd, sylvan_false);
+                    BDD low  = sylvan_makenode(w_vars[n]+1, dst_bdd, sylvan_false);
                     mtbdd_refs_push(low);
                     BDD high = sylvan_makenode(w_vars[n]+1, sylvan_false, dst_bdd);
                     mtbdd_refs_pop(1);
-                    dst_bdd = sylvan_makenode(w_vars[n], low, high);
+                    dst_bdd  = sylvan_makenode(w_vars[n], low, high);
                 }
             } else {
                 // actually write
                 for (int j=sb-1; j>=0; j--) {
                     n--;
                     if (dst[i] & (1LL<<(sb-j-1))) dst_bdd = sylvan_makenode(w_vars[n]+1, sylvan_false, dst_bdd);
-                    else dst_bdd = sylvan_makenode(w_vars[n]+1, dst_bdd, sylvan_false);
+                    else                          dst_bdd = sylvan_makenode(w_vars[n]+1, dst_bdd, sylvan_false);
                 }
             }
         }
