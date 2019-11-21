@@ -36,13 +36,11 @@ libvset_la_LDFLAGS  += $(MCRL_LDFLAGS)
 libvset_la_LIBADD   += -lATerm
 endif
 
-#if HAVE_SDD
-libvset_la_SOURCES += vset_sdd.c
-#libvset_la_LIBADD  +=
-libvset_la_LDFLAGS += -I /home/lieuwe/sdd-package-2.0/libsdd-2.0/include -L/home/lieuwe/sdd-package-2.0/libsdd-2.0/lib -lsdd -lm
-# $(SDD_LDFLAGS)
+if HAVE_SDD
+libvset_la_SOURCES += vset_sdd.c vtree_utils.c sdd_utils.c vset_sdd_utils.c
+libvset_la_LDFLAGS +=  $(SDD_LDFLAGS) -lsdd -lm
 libvset_la_CFLAGS  += $(SDD_CFLAGS)
-#endif
+endif
 
 if HAVE_LIBDDD
 libvset_la_SOURCES  += vset_ddd.cpp

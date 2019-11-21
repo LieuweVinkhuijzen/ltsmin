@@ -7,8 +7,7 @@
 #ifndef VTREE_UTILS_C_
 #define VTREE_UTILS_C_
 
-#include "vtree_utils.h"
-#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
+#include <vset-lib/vtree_utils.h>
 
 // Every non-leaf vtree node has a unique dissection literal,
 // and every literal is the dissection literal of a unique non-leaf vtree,

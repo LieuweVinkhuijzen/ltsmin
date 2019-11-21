@@ -8,8 +8,11 @@
 #ifndef SRC_VSET_LIB_SDD_UTILS_H_
 #define SRC_VSET_LIB_SDD_UTILS_H_
 
-#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
 #include <inttypes.h>
+#include "sddapi.h"
+
+#include <vset-lib/vector_set.h>
+
 
 unsigned int sdd_literal_value(SddNode* x);
 SddLiteral sdd_literal_index(SddNode* x);

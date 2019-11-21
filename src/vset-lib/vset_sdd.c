@@ -1,5 +1,4 @@
-#ifndef _VSET_SDD_CPP_
-#define _VSET_SDD_CPP_
+#include <config.h>
 
 /* SDD API for the LTSmin library
  *
@@ -15,25 +14,31 @@
 	  i.e., the literal on which this node bissects the variable order
  */
 
-#include <vset-lib/vdom_object.h>
-#include "vset_sdd.h"
 #include <alloca.h>
 #include <inttypes.h>
 #include <math.h>
 #include <string.h>
-#include "stdio.h"
+#include <stdio.h>
+#include <time.h>
+
 #include <hre/user.h>
 #include <hre-io/user.h>
-#include <time.h>
-// TODO find a way to incorporate the following files into the Makefiles
-#include "vtree_utils.h"
-#include "sdd_utils.h"
-#include "vset_sdd_utils.h"
-#include "vtree_utils.c"
-#include "sdd_utils.c"
-#include "vset_sdd_utils.c"
+#include <vset-lib/vdom_object.h>
+#include <vset-lib/sdd_utils.h>
+#include <vset-lib/vtree_utils.h>
+#include <vset-lib/vset_sdd_utils.h>
+#include <vset-lib/vset_sdd.h>
 
-//#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
+
+double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
+double union_time   = 0;  // Amount of time used by sdd_disjoin
+double conjoin_time = 0;  // Amount of time used by sdd_conjoin
+double debug_time   = 0;  // Amount of time spent on safety checks and sanity checks
+double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
+double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
+double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
+int xstatebits = 16;  // bits per integer
+
 
 //   ---   Command line options
 static int static_vtree_search = 2;    // Default: Search for a static vtree before execution, starting from right-linear
@@ -947,7 +952,7 @@ static void state_to_cube(vdom_t dom, int k, const int* proj, const int* state, 
 
 // Adds the state vector e to the set
 // e has length dom->vectorsize and each 4-byte integer contains xstatebits bits
-static void set_add(vset_t set, const int* e) {
+void set_add(vset_t set, const int* e) {
 	// This function is the first function that is called when exploration starts
 	if (!exploration_started) {
 		sdd_initialise_given_rels();
@@ -2436,11 +2441,4 @@ vdom_t vdom_create_sdd(int n) {
 	}
 	return dom_create(n, _statebits, 0);
 }
-
-#endif
-
-
-
-
-
 

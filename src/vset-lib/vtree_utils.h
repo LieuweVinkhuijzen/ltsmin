@@ -8,7 +8,10 @@
 #ifndef SRC_VSET_LIB_VTREE_UTILS_H_
 #define SRC_VSET_LIB_VTREE_UTILS_H_
 
-#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
+#include "sddapi.h"
+
+#include <vset-lib/vset_sdd.h>
+
 
 typedef enum {
 	right,
@@ -30,6 +33,8 @@ SddLiteral vtree_highest_var(Vtree* tree);
 SddLiteral vtree_lowest_var(Vtree* tree);
 
 unsigned int vtree_variables_count(Vtree* tree);
+
+unsigned int vtree_distance(Vtree* a, Vtree* b);
 
 Vtree* sdd_vtree_child(Vtree* v, unsigned int direction);
 

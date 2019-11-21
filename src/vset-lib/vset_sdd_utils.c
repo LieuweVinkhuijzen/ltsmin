@@ -5,7 +5,19 @@
  *      Author: lieuwe
  */
 
-#include "vset_sdd_utils.h"
+#include <stdlib.h>
+#include <string.h>
+
+
+#include <vset-lib/vector_set.h>
+#include <vset-lib/vset_sdd_utils.h>
+#include <vset-lib/vset_sdd.h>
+
+
+vrel_ll_t first_vrel = 0;
+vrel_ll_t last_vrel = 0;
+vset_ll_t first_vset = 0;
+vset_ll_t last_vset = 0;
 
 void vset_set_domain_rel(vset_t dst, vrel_t rel) {
 	vrel_ll_t rel_ll = get_vrel(rel->id);

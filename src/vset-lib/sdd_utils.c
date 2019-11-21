@@ -8,11 +8,10 @@
 #ifndef _SDD_UTILS_C_
 #define _SDD_UTILS_C_
 
-#include "sdd_utils.h"
-#include "vset_sdd_utils.h"
+#include <vset-lib/sdd_utils.h>
 #include <vset-lib/vdom_object.h>
-#include "vset_sdd.h"
-#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
+#include <vset-lib/vset_sdd.h>
+#include <vset-lib/vset_sdd_utils.h>
 
 
 unsigned int sdd_literal_value(SddNode* x) {

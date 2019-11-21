@@ -8,11 +8,12 @@
 #ifndef SRC_VSET_LIB_VSET_SDD_H_
 #define SRC_VSET_LIB_VSET_SDD_H_
 
-#include "vtree_utils.h"
-#include "sdd_utils.h"
+#include <vset-lib/sdd_utils.h>
+#include <vset-lib/vdom_object.h>
+#include <vset-lib/vtree_utils.h>
 
 //extern "C" {
-#include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
+#include "sddapi.h"
 //}
 
 /* Bookkeep the variables that the SDD uses
@@ -72,14 +73,14 @@ struct vector_relation {
 	SddNode* sdd;
 };
 
-double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
-double union_time   = 0;  // Amount of time used by sdd_disjoin
-double conjoin_time = 0;  // Amount of time used by sdd_conjoin
-double debug_time   = 0;  // Amount of time spent on safety checks and sanity checks
-double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
-double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
-double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
-static int xstatebits = 16;  // bits per integer
+extern double exists_time;  // Amount of time used by sdd_exists (Existential Quantification)
+extern double union_time;  // Amount of time used by sdd_disjoin
+extern double conjoin_time;  // Amount of time used by sdd_conjoin
+extern double debug_time;  // Amount of time spent on safety checks and sanity checks
+extern double rel_update_time; // Amount of time spent on rel_update and model enumeration
+extern double rel_increment_time; // Amount of time spent, within rel_update, on adding a single model to rel
+extern double sdd_enumerate_time; // Amount of time spent enumerating models with SDD
+extern int xstatebits;  // bits per integer
 
 
 
@@ -114,6 +115,6 @@ void sdd_next_model(struct sdd_mit_master*);
 
 void small_enum(vset_t src);
 
-static void set_add(vset_t src, const int* e);
+void set_add(vset_t src, const int* e);
 
 #endif /* SRC_VSET_LIB_VSET_SDD_H_ */

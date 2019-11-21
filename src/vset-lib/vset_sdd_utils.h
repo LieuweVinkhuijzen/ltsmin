@@ -1,3 +1,6 @@
+#ifndef SRC_VSET_LIB_VSET_SDD_UTILS_H_
+#define SRC_VSET_LIB_VSET_SDD_UTILS_H_
+
 /*
  * vset_sdd_utils.h
  *
@@ -5,8 +8,11 @@
  *      Author: lieuwe
  */
 
-#ifndef SRC_VSET_LIB_VSET_SDD_UTILS_H_
-#define SRC_VSET_LIB_VSET_SDD_UTILS_H_
+
+#include <vset-lib/vector_set.h>
+#include <vset-lib/vset_sdd_utils.h>
+#include <vset-lib/vset_sdd.h>
+
 
 void vset_set_domain_rel(vset_t dst, vrel_t rel);
 
@@ -29,10 +35,10 @@ struct vector_set_ll;
 typedef struct vector_relation_ll* vrel_ll_t;
 typedef struct vector_set_ll* vset_ll_t;
 
-vrel_ll_t first_vrel = 0;
-vrel_ll_t last_vrel = 0;
-vset_ll_t first_vset = 0;
-vset_ll_t last_vset = 0;
+extern vrel_ll_t first_vrel;
+extern vrel_ll_t last_vrel;
+extern vset_ll_t first_vset;
+extern vset_ll_t last_vset;
 
 // A linked list structure for the vrel_t objects
 // Necessary due to freak bug in ltsmin (or freak bug in this code?)
