@@ -8,6 +8,9 @@
 #ifndef SRC_VSET_LIB_VSET_SDD_H_
 #define SRC_VSET_LIB_VSET_SDD_H_
 
+#include "vtree_utils.h"
+#include "sdd_utils.h"
+
 //extern "C" {
 #include "/home/lieuwe/sdd-package-2.0/libsdd-2.0/include/sddapi.h"
 //}
@@ -17,50 +20,70 @@
  */
 
 
-struct vector_domain;
+struct vector_domain
+{
+    struct vector_domain_shared shared;
 
-struct vector_set;
+    int vectorsize;             // number of integers for each full state
+    int *statebits;             // number of bits for each state variable
+    int actionbits;             // number of bits for the action label
 
-struct vector_relation;
+    /* The following are automatically generated from the above */
+
+    int totalbits;              // number of bits for each full state
+    int* state_variables;       // array of variable indices, representing the set of variables of the set
+    int* prime_variables;       // array of variable indices, representing the set of primed variables
+    //SDD* state_variables;        // set of all state variables
+    //SDD* prime_variables;        // set of all prime state variables
+    //SDD* action_variables;       // set of action label variables
+};
+
+struct vector_set {
+	vdom_t dom;
+
+	unsigned int n; // Placeholder variable for testing, Replace with SDD
+	SddNode* sdd;
+
+	int k;         // number of variables in this set, or -1 if the set contains all state variables
+	               //   (is this the number of variables on which this set depends?)
+	int* proj;     // array of indices of program variables used by this set
+
+	int* state_variables;  // array of variable indices of bits, used to represent the variables of proj
+	                       //   The arrays state_variables and proj may be different when a program variable is an integer.
+	                       //   In that case, state_variables will contain xstatebits (=16) different variables to represent this integer
+	unsigned int nstate_variables; // length of state_variables array
+
+	unsigned int id;       // unique ID of this set
+};
+
+struct vector_relation {
+	vdom_t dom;
+
+	int r_k;     // number of read variables
+	int w_k;      // number of write variables
+	int* r_proj; // array  of read variable indices
+	int* w_proj; // array of write variable indices
+
+	int* state_variables; // array of bit-variable indices, the unprimed variables
+	int* prime_variables; // array of bit-variable indices, the primed variables
+
+	unsigned int id;      // unique ID of this relation
+
+	SddNode* sdd;
+};
+
+double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
+double union_time   = 0;  // Amount of time used by sdd_disjoin
+double conjoin_time = 0;  // Amount of time used by sdd_conjoin
+double debug_time   = 0;  // Amount of time spent on safety checks and sanity checks
+double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
+double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
+double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
+static int xstatebits = 16;  // bits per integer
+
+
 
 extern SddManager* sisyphus;
-
-
-/*
- * Version 2, each node is normalised to a vtree node.
- *  We do look at the corresponding vset.
-  TODO
-    + put iterator functionality in a separate file
-    + Consistent naming
- *
- * iprime is for when the prime is the True node. In that case, iPrime goes from 0 to 2^m-1
- *   for some appropriate m
- *  Invariants:
- *  +  prime is not False
- */
-
-struct sdd_model_iterator {
-	//vset_t vset; //obsolete
-	SddNode* root;
-	//Vtree* vtree; //obsolete
-	unsigned int i;
-	//int* e; // obsolete
-	int finished;
-
-	//unsigned int iprime; // obsolete
-	//unsigned int isub;   // obsolete
-	//unsigned int primeFinished; // obsolete
-	//unsigned int subFinished;   // obsolete
-	unsigned int var_is_used;
-};
-
-// TODO none of the functions need mas by reference except sdd_next_model
-struct sdd_mit_master {
-	vset_t vset;
-	struct sdd_model_iterator* nodes;
-	int* e;
-	unsigned int finished;
-};
 
 // TODO upgrade to long long unsigned int value, if things get out of hand, or to a list
 void sdd_set_vtree_value_rec(const Vtree* tree, const unsigned int value, int* e, const unsigned int varsDone);
