@@ -7,6 +7,11 @@ TAGS
 *.sum
 *.plist
 *.dSYM
+*.dot
+*.txt
+*.o
+*.dot
+*.svg
 config.h.in
 .libs/
 .metadata/
@@ -37,3 +42,8 @@ include/
 /examples/*.lps
 /examples/abp.pbes
 nbproject
+/build/
+
+
+# TEMPORARY
+lib/
