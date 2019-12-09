@@ -502,24 +502,24 @@ void find_static_vtree() {
 //			printf("Start search %i %li\n", i, v); fflush(stdout);
 			// TODO use the rotation struct
 			target = get_vtree_by_dissection_literal(sdd_manager_vtree(manager_int), v);
-			printf("Got the target: %lu.\n", sdd_vtree_position(target)); fflush(stdout);
+//			printf("Got the target: %lu.\n", sdd_vtree_position(target)); fflush(stdout);
 //			tree_int = sdd_manager_vtree(manager_int);
 //			printf("Got the root: %lu.\n", sdd_vtree_position(tree_int)); fflush(stdout);
 			parent = sdd_vtree_parent(target);
 			if (parent == 0) {
-				printf("This is the root, skipping.\n"); fflush(stdout);
+//				printf("This is the root, skipping.\n"); fflush(stdout);
 				continue;
 			}
 			rotation = sdd_vtree_rotate_up(target, manager_int);
-			printf("Rotated up.\n"); fflush(stdout);
+//			printf("Rotated up.\n"); fflush(stdout);
 			penalty = vtree_penalty(sdd_manager_vtree(manager_int));
-			printf("Penalty: %u.\n", penalty);  fflush(stdout);
+//			printf("Penalty: %u.\n", penalty);  fflush(stdout);
 			sdd_vtree_undo_rotation(rotation);
-			printf("Undid rotation.\n"); fflush(stdout);
+//			printf("Undid rotation.\n"); fflush(stdout);
 			if (penalty < penalty_min) {
 				dis_min = v;
 				penalty_min = penalty;
-				printf("Found a better Vtree by rotating %lu yielding %u\n", dis_min, penalty); fflush(stdout);
+//				printf("Found a better Vtree by rotating %lu yielding %u\n", dis_min, penalty); fflush(stdout);
 			}
 			/*
 
@@ -576,7 +576,7 @@ void find_static_vtree() {
 		// If an improvement is found
 		if (penalty_min < penalty_current) {
 			// Perform the best operation
-			printf("Found an improvement: Rotate %li up for %u penalty. Implementing improvement.\n", dis_min, penalty_min); fflush(stdout);
+//			printf("Found an improvement: Rotate %li up for %u penalty. Implementing improvement.\n", dis_min, penalty_min); fflush(stdout);
 			tree_int = sdd_manager_vtree(manager_int);
 			target = get_vtree_by_dissection_literal(tree_int, dis_min);
 			sdd_vtree_rotate_up(target, manager_int);
