@@ -343,9 +343,9 @@ void vtree_apply_random_rotation(Vtree* root, SddManager* manager) {
 }
 
 void sdd_vtree_apply_rotation(struct sdd_vtree_rotation rot) {
-	printf("[vtree apply rotation] Getting target.\n"); fflush(stdout);
+//	printf("[vtree apply rotation] Getting target.\n"); fflush(stdout);
 	Vtree* target = get_vtree_by_dissection_literal(sdd_manager_vtree(rot.manager), rot.dislit);
-	printf("[vtree apply rotation] Got target: %lu. Applying rotation.\n", sdd_vtree_position(target)); fflush(stdout);
+//	printf("[vtree apply rotation] Got target: %lu. Applying rotation.\n", sdd_vtree_position(target)); fflush(stdout);
 	switch (rot.direction) {
 	case right:
 		sdd_vtree_rotate_right(target, rot.manager, 0);
@@ -354,7 +354,7 @@ void sdd_vtree_apply_rotation(struct sdd_vtree_rotation rot) {
 		sdd_vtree_rotate_left(target, rot.manager, 0);
 		break;
 	}
-	printf("[vtree apply rotation] Applied rotation.\n"); fflush(stdout);
+//	printf("[vtree apply rotation] Applied rotation.\n"); fflush(stdout);
 }
 
 void sdd_vtree_undo_rotation(struct sdd_vtree_rotation rot) {
@@ -372,7 +372,7 @@ struct sdd_vtree_rotation sdd_vtree_rotation_inverse(struct sdd_vtree_rotation r
 		inverse.direction = left;
 		break;
 	}
-	printf("Inverse: {%lu, %u}\n", sdd_vtree_position(get_vtree_by_dissection_literal(sdd_manager_vtree(inverse.manager), inverse.dislit)), inverse.direction); fflush(stdout);
+//	printf("Inverse: {%lu, %u}\n", sdd_vtree_position(get_vtree_by_dissection_literal(sdd_manager_vtree(inverse.manager), inverse.dislit)), inverse.direction); fflush(stdout);
 	return inverse;
 }
 
