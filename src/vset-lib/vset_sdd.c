@@ -47,6 +47,7 @@ static int vtree_increment_config = 8; // Default: Use cache, traverse literals 
 static int sdd_exist_config = 0;       // Default: Make no attempt to improve existential quantification
 static int sdd_separate_rw = 1;        // Default: Do not separate read from write operations, because there seems to be a bug there
 static int vtree_penalty_fn = 3;       // Default: sum of vertical distances read -> write
+static int dynamic_vtree_search = 0;   // Default: Do not minimize vtree search dynamically
 
 struct poptOption sdd_options[] = {
 	{ "vtree-search", 0, POPT_ARG_INT, &static_vtree_search, 0, "Whether to search for a static Variable Tree before the exploration starts: 0 (no search) 1 (balanced) 2 (right-linear) 3 (left-linear).", "<0|1|2|3>"},
@@ -55,6 +56,7 @@ struct poptOption sdd_options[] = {
 	{ "sdd-exist", 0, POPT_ARG_INT, &sdd_exist_config, 0, "SDD Existential Operator: 0 (defeault, simple) 1 (per integer) 2 (reverse order)", "<0|1|2>"},
 	{ "sdd-rw", 0, POPT_ARG_INT, &sdd_separate_rw, 0, "Refine transitions into read, write and copy dependencies, or not: 0 (default, no separation) 1 (separation)", "<0|1>"},
 	{ "vtree-pen", 0, POPT_ARG_INT, &vtree_penalty_fn, 0, "Choice of Vtree penalty function heuristic during static Vtree search: 0 (sum vertical distances) 1 (sum max distances) 2 (sum read-write) 3 (weighted read-write) 4 (inverse weighted read-write)", "<0|1>"},
+	{ "dynamic-vtree", 0, POPT_ARG_INT, &dynamic_vtree_search, 0, "Turn dynamic Vtree minimization off (0) or on (1)", "<0|1>"},
     POPT_TABLEEND
 };
 
@@ -658,7 +660,9 @@ void sdd_set_and_ref(vset_t set, SddNode* S) {
 	if (fp > peak_footprint) peak_footprint = fp;
 	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
 		sdd_manager_garbage_collect(sisyphus);
-//		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
+		if (dynamic_vtree_search) {
+			sdd_manager_minimize(sisyphus);
+		}
 		//printf("Sdd Garbage Collect.\n");
 		gc_count++;
 	}
