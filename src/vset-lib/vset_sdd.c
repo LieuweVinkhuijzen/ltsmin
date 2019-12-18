@@ -45,9 +45,9 @@ static int static_vtree_search = 2;    // Default: Search for a static vtree bef
 static int vtree_integer_config = 1;   // Default: Augmented right-linear
 static int vtree_increment_config = 8; // Default: Use cache, traverse literals backward, integer by integer
 static int sdd_exist_config = 0;       // Default: Make no attempt to improve existential quantification
-static int sdd_separate_rw = 1;        // Default: Do not separate read from write operations, because there seems to be a bug there
-static int vtree_penalty_fn = 3;       // Default: sum of vertical distances read -> write
-static int dynamic_vtree_search = 0;   // Default: Do not minimize vtree search dynamically
+static int sdd_separate_rw = 1;        // Default: Separate read-write-copy dependencies
+static int vtree_penalty_fn = 3;       // Default: sum Vtree-distances, penalizing write->read dependencies
+static int dynamic_vtree_search = 0;   // Default: No dynamic Vtree minimization
 
 struct poptOption sdd_options[] = {
 	{ "vtree-search", 0, POPT_ARG_INT, &static_vtree_search, 0, "Whether to search for a static Variable Tree before the exploration starts: 0 (no search) 1 (balanced) 2 (right-linear) 3 (left-linear).", "<0|1|2|3>"},
@@ -64,9 +64,11 @@ const SddSize sdd_gc_threshold_abs = 100000000; // Absolute threshold: 100MB
 unsigned int enum_error = 0; // flag whether enum has gone wrong yet
 const double vtree_search_timeout = 30.0; // 30 seconds for Vtree search
 unsigned int gc_count = 0; // Number of garbage collections
+unsigned int dynMin_count = 0; // Number of calls to dynamic Vtree minimization
 unsigned int exploration_started = 0; // Whether the first element has been added yet
 clock_t sdd_exploration_start;
 void* dummy; int dummy_int; // Dummy variables that we use to suppress compiler warnings "Warning: unused parameter"
+const double base_wait_dm = 1.0;  // Base amount of time to wait between dynamic minimization runs. Default: 1 second
 
 SddNode* rel_update_smart_temp;
 const unsigned int rel_update_smart_cache_size = 64;
@@ -90,12 +92,12 @@ SddManager* sisyphus = NULL;
 
 void print_footprint() {
 	double time_elapsed = (double)(clock() - sdd_exploration_start);
-	Warning(info,"\t\tEx\tU\tI\tR\tRi\tenum\telems k\tnodes\tMem kB\tgc\n"
-"\t\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%lu\t%lu\t%lu\t%u\n\t\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\n",
+	Warning(info,"\t\tEx\tU\tI\tR\tRi\tenum\telems k\tnodes\tMem kB\tgc\tdyn\n"
+"\t\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%lu\t%lu\t%lu\t%u\t%u\n\t\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\n",
 			exists_time / CLOCKS_PER_SEC, union_time / CLOCKS_PER_SEC,
 			conjoin_time / CLOCKS_PER_SEC, rel_update_time / CLOCKS_PER_SEC, rel_increment_time / CLOCKS_PER_SEC,
 			sdd_enumerate_time / CLOCKS_PER_SEC,
-			sdd_manager_live_size(sisyphus)/1000, sdd_manager_live_count(sisyphus), sdd_memory_live_footprint(), gc_count,
+			sdd_manager_live_size(sisyphus)/1000, sdd_manager_live_count(sisyphus), sdd_memory_live_footprint(), gc_count, dynMin_count,
 			100.0f * exists_time / time_elapsed, 100.0f * union_time / time_elapsed,
 			100.0f * conjoin_time / time_elapsed, 100.0f * rel_update_time / time_elapsed, 100.0f* rel_increment_time / time_elapsed,
 			100.0f * sdd_enumerate_time / time_elapsed);
@@ -254,8 +256,8 @@ unsigned int vtree_penalty_1(Vtree* tree) {
 	return pen;
 }
 
-/* Penalty: Sum over relations: sum of pairwise distances
- */
+// Flow-neutral Vtrees:
+// Penalty: Sum over relations: sum of pairwise distances
 unsigned int vtree_penalty_2(Vtree* tree) {
 	unsigned int penalty = 0;
 	Vtree* v1_vtree; Vtree* v2_vtree;
@@ -271,6 +273,7 @@ unsigned int vtree_penalty_2(Vtree* tree) {
 	return penalty;
 }
 
+// Right-flowing Vtrees:
 // Penalty for write->read dependencies is worse than for read->write dependencies
 unsigned int vtree_penalty_3(Vtree* tree) {
 	unsigned int penalty = 0;
@@ -294,6 +297,7 @@ unsigned int vtree_penalty_3(Vtree* tree) {
 	return penalty;
 }
 
+// Left-flowing Vtrees:
 // Penalty for read->write dependencies is worse than for write->read dependencies
 unsigned int vtree_penalty_4(Vtree* tree) {
 	unsigned int penalty = 0;
@@ -649,6 +653,48 @@ static SddModelCount set_count_exact(vset_t set) {
 	return mc;
 }
 
+// Collect garbage and minimize Vtree if conditions are met
+void sdd_minimize_maybe() {
+	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
+		sdd_manager_garbage_collect(sisyphus);
+		//printf("Sdd Garbage Collect.\n");
+		gc_count++;
+	}
+	static clock_t last_dynamic_minimization = 0;
+	if (last_dynamic_minimization == 0) last_dynamic_minimization = clock();
+
+	if (dynamic_vtree_search) {
+		// Employ a scale-free minimization strategy
+		double time_since_ldm = (double)(clock() - last_dynamic_minimization);
+		// Get nr of zeroes
+		unsigned int k=1;
+		while (!((dynMin_count+1) & k)) {
+			k = (k << 1);
+		}
+		double time_threshold = ((double)k) * base_wait_dm;
+		// Is the time since last Dynamic Minimization greater than
+		// the time threshold?
+		if (time_since_ldm > time_threshold * CLOCKS_PER_SEC) {
+			//set Time budget. Ensure that no more than 50% of time is spent minimizing vtrees
+
+			double search_time_budget = time_since_ldm / CLOCKS_PER_SEC;
+
+			// Keep default time limit ratios
+			sdd_manager_set_vtree_search_time_limit(search_time_budget, sisyphus);
+			sdd_manager_set_vtree_fragment_time_limit(search_time_budget, sisyphus);
+			sdd_manager_set_vtree_operation_time_limit(search_time_budget, sisyphus);
+			sdd_manager_set_vtree_apply_time_limit(search_time_budget, sisyphus);
+			printf("[Dyn min] Minimizing with time limit %f\n", search_time_budget);
+			clock_t before = clock();
+			sdd_manager_minimize_limited(sisyphus);
+			double elapsed = (double)(clock() - before);
+			printf("[Dyn min] Minimization took %f sec\n", elapsed / CLOCKS_PER_SEC);
+			dynMin_count++;
+			last_dynamic_minimization = clock();
+		}
+	}
+}
+
 void sdd_set_and_ref(vset_t set, SddNode* S) {
 //	printf("[sdd set and ref] start  set %u  S=%p\n", set->id, S); fflush(stdout);
 	sdd_ref(S, sisyphus);
@@ -658,14 +704,7 @@ void sdd_set_and_ref(vset_t set, SddNode* S) {
 	set->sdd = S;
 	unsigned int fp = sdd_memory_live_footprint();
 	if (fp > peak_footprint) peak_footprint = fp;
-	if (sdd_manager_dead_size(sisyphus) > sdd_gc_threshold_abs) {
-		sdd_manager_garbage_collect(sisyphus);
-		if (dynamic_vtree_search) {
-			sdd_manager_minimize(sisyphus);
-		}
-		//printf("Sdd Garbage Collect.\n");
-		gc_count++;
-	}
+	sdd_minimize_maybe();
 }
 
 void sdd_set_rel_and_ref(vrel_t rel, SddNode* R) {
@@ -674,11 +713,7 @@ void sdd_set_rel_and_ref(vrel_t rel, SddNode* R) {
 	rel->sdd = R;
 	unsigned int fp = sdd_memory_live_footprint();
 	if (fp > peak_footprint) peak_footprint = fp;
-	if (sdd_memory_dead_footprint() > sdd_gc_threshold_abs) {
-		sdd_manager_garbage_collect(sisyphus);
-//		sdd_vtree_minimize(sdd_manager_vtree(sisyphus), sisyphus);
-		gc_count++;
-	}
+	sdd_minimize_maybe();
 }
 
 static vset_t set_create(vdom_t dom, int k, int* proj) {
