@@ -50,12 +50,12 @@ static int vtree_penalty_fn = 3;       // Default: sum Vtree-distances, penalizi
 static int dynamic_vtree_search = 0;   // Default: No dynamic Vtree minimization
 
 struct poptOption sdd_options[] = {
-	{ "vtree-search", 0, POPT_ARG_INT, &static_vtree_search, 0, "Whether to search for a static Variable Tree before the exploration starts: 0 (no search) 1 (balanced) 2 (right-linear) 3 (left-linear).", "<0|1|2|3>"},
+	{ "vtree-search-init", 0, POPT_ARG_INT, &static_vtree_search, 0, " The initial vtree when searching heuristically: 0 (BDD-like right-linear) 1 (balanced) 2 (right-linear) 3 (left-linear).", "<0|1|2|3>"},
 	{ "vtree-integer", 0, POPT_ARG_INT, &vtree_integer_config, 0, "Variable Tree corresponding to integers. 0 (balanced) 1 (augmened right-linear) 2 (right-linear) 3 (intermediate wrt balanced / RL)", "<0|1|2>"},
 	{ "vtree-increment", 0, POPT_ARG_INT, &vtree_increment_config, 0, "Way to add a relation element: 0 (naive) 1 (batch) 2 (variables left-to-right) 3 (faithful to Vtree)", "<0|1|2|3>"},
 	{ "sdd-exist", 0, POPT_ARG_INT, &sdd_exist_config, 0, "SDD Existential Operator: 0 (defeault, simple) 1 (per integer) 2 (reverse order)", "<0|1|2>"},
 	{ "sdd-rw", 0, POPT_ARG_INT, &sdd_separate_rw, 0, "Refine transitions into read, write and copy dependencies, or not: 0 (default, no separation) 1 (separation)", "<0|1>"},
-	{ "vtree-pen", 0, POPT_ARG_INT, &vtree_penalty_fn, 0, "Choice of Vtree penalty function heuristic during static Vtree search: 0 (sum vertical distances) 1 (sum max distances) 2 (sum read-write) 3 (weighted read-write) 4 (inverse weighted read-write)", "<0|1>"},
+	{ "vtree-pen", 0, POPT_ARG_INT, &vtree_penalty_fn, 0, "Choice of Vtree penalty function heuristic during static Vtree search: 0 (no heuristic search) 1 (sum max distances) 2 (sum read-write) 3 (weighted read-write) 4 (inverse weighted read-write)", "<0|1|2|3|4>"},
 	{ "dynamic-vtree", 0, POPT_ARG_INT, &dynamic_vtree_search, 0, "Turn dynamic Vtree minimization off (0) or on (1)", "<0|1>"},
     POPT_TABLEEND
 };
@@ -470,28 +470,21 @@ unsigned int vtree_penalty(Vtree* tree) {
 	case 2:  return vtree_penalty_2(tree);
 	case 3:  return vtree_penalty_3(tree);
 	case 4:  return vtree_penalty_4(tree);
-	case 0:
-	default: return vtree_penalty_0(tree);
+	default: return 0;
 	}
 }
 
 Vtree* initial_integer_tree() {
 	switch (static_vtree_search) {
-		case 2: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "right"); break;
+		case 1: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "balanced"); break;
 		case 3: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "left"); break;
-		case 1:
-		default: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "balanced"); break;
+		case 2:
+		default: return sdd_vtree_new(first_vrel->rel->dom->vectorsize, "right"); break;
 	}
 }
 
-void find_static_vtree() {
-	printf("Finding static vtree.\n");
+void heuristic_vtree_search(Vtree* tree_int, SddManager* manager_int) {
 	clock_t before = clock();
-	Vtree* tree_int = initial_integer_tree();
-	SddManager* manager_int = sdd_manager_new(tree_int);
-	// This manager contains one node for each integer variable of the program.
-	// It is a "draft" tree.
-
 	// Greedy search for best vtree
 	const unsigned int budget = 3*sdd_manager_var_count(manager_int);
 	unsigned int penalty_current, penalty_min, penalty;
@@ -594,10 +587,24 @@ void find_static_vtree() {
 			break; // No improvement possible; terminate
 		}
 	}
+}
+
+void find_static_vtree() {
+	printf("Finding static vtree.\n");
+	Vtree* tree_int = initial_integer_tree();
+	SddManager* manager_int = sdd_manager_new(tree_int);
+	// This manager contains one node for each integer variable of the program.
+	// It is a "draft" tree, called the "abstract program variable tree" (AVT)
+
+	if (vtree_penalty_fn) {
+		heuristic_vtree_search(tree_int, manager_int);
+	}
 
 	// Convert the "draft" tree with integer-labeled leaves to
 	//   a larger one with bit-labeled leaves
+//	sdd_vtree_save_as_dot("vtree-avt.dot", sdd_manager_vtree(manager_int));
 	vtree_from_integer_tree(sdd_manager_vtree(manager_int), manager_int);
+//	sdd_vtree_save_as_dot("vtree-full.dot", sdd_manager_vtree(sisyphus));
 }
 
 /* This function is called once, when the exploration is about to begin
@@ -608,7 +615,7 @@ void sdd_initialise_given_rels() {
 	exploration_started = 1;
 	Vtree* tree = sdd_vtree_new(2 * xstatebits * first_vset->set->dom->vectorsize, "right");
 	sisyphus = sdd_manager_new(tree);
-	if (static_vtree_search) {
+	if (static_vtree_search || vtree_penalty_fn) {
 		find_static_vtree();
 	}
 	// Give all the vsets and rels empty SDDs relative to sisyphus
