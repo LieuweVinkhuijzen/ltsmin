@@ -1097,9 +1097,9 @@ static void set_copy(vset_t dst, vset_t src) {
 
 static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 	SddModelCount mc = set_count_exact(set);
-	printf("  [Sdd enum v2] set %u (%llu models)\n", set->id, mc);
+	Printf(info, "  [Sdd enum v3] set %u (%llu models)\n", set->id, mc);
 	if (sdd_node_is_false(set->sdd)) {
-		printf("    (empty)\n");
+		Printf(info, "    (empty)\n");
 	}
 	else {
 		int k = set->k == -1 ? set->dom->vectorsize : set->k;
@@ -1108,7 +1108,7 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 		SddModelCount i = 0;
 		struct sdd_mit_master mas;
 		for (mas = sdd_get_iterator(set); mas.finished == 0; sdd_next_model(&mas)) {
-			printf("    ");
+			Printf(info, "    ");
 			// Refactor mas.e to a bit-array
 			for (int i=0; i<k; i++) {
 				vec[i] = 0; // TODO put this in the next loop
