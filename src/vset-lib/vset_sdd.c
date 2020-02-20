@@ -1102,10 +1102,26 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 		printf("    (empty)\n");
 	}
 	else {
+		int k = set->k == -1 ? set->dom->vectorsize : set->k;
+		int vec[k]; // TODO finish this thought
+		int d, var;
 		SddModelCount i = 0;
 		struct sdd_mit_master mas;
 		for (mas = sdd_get_iterator(set); mas.finished == 0; sdd_next_model(&mas)) {
 			printf("    ");
+			// Refactor mas.e to a bit-array
+			for (int i=0; i<k; i++) {
+				vec[i] = 0; // TODO put this in the next loop
+			}
+			for (int i=0; i<k; i++) {
+				var = set->k == -1 ? i : set->proj[i];
+				for (int b=0; b<xstatebits; b++) {
+					d = (mas.e[xstatebits*var+b]) << b;
+					//printf("  e[%i] |= %i\n", i, d);
+					vec[i] |= d;
+				}
+			}
+			cb(context, vec);
 			for (int i=0; i<set->dom->vectorsize * xstatebits; i++) {
 				if ((i%16) == 0 && i != 0) {
 					printf(" ");
