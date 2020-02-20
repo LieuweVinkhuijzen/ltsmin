@@ -1124,11 +1124,11 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 			cb(context, vec);
 			for (int i=0; i<set->dom->vectorsize * xstatebits; i++) {
 				if ((i%16) == 0 && i != 0) {
-					printf(" ");
+					Printf(info, " ");
 				}
-				printf("%u", mas.e[i]);
+				Printf(info, "%u", mas.e[i]);
 			}
-			printf("\n");
+			Printf(info, "\n");
 			i++;
 			if (i > mc) {
 				printf("  \n\nWell that's curious. We got more elements than we counted models.\n");
