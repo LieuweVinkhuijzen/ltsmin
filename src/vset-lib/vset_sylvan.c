@@ -550,6 +550,10 @@ set_enum(vset_t set, vset_element_cb cb, void* context)
     while (res != mtbdd_false) {
         state_from_cube(set->dom, set->k, set->proj, vec, arr);
         cb(context, vec);
+        for (int i=0; i<set->k; i++) {
+        	Printf(info, "%p ", vec[i]);
+        }
+        Printf(info, "\n");
         res = mtbdd_enum_all_next(set->bdd, set->state_variables, arr, NULL);
     }
 }
