@@ -545,14 +545,14 @@ set_enum(vset_t set, vset_element_cb cb, void* context)
 {
     int k = set->k == -1 ? set->dom->vectorsize : set->k;
     int vec[k];
-    Printf(info, "[Sylvan] Enumerating set with %i items.\n", set->k);
+    Printf(info, "[Sylvan] Enumerating set on %i variables.\n", set->k);
     uint8_t arr[xstatebits * k];
     MTBDD res = mtbdd_enum_all_first(set->bdd, set->state_variables, arr, NULL);
     while (res != mtbdd_false) {
         state_from_cube(set->dom, set->k, set->proj, vec, arr);
         cb(context, vec);
         for (int i=0; i<set->k; i++) {
-        	Printf(info, "%p ", vec[i]);
+        	Printf(info, "%X ", vec[i]);
         }
         Printf(info, "\n");
         res = mtbdd_enum_all_next(set->bdd, set->state_variables, arr, NULL);

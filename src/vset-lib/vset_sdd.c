@@ -1097,7 +1097,7 @@ static void set_copy(vset_t dst, vset_t src) {
 
 static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 	SddModelCount mc = set_count_exact(set);
-	Printf(info, "  [Sdd enum v3] set %u (%llu models)\n", set->id, mc);
+	Printf(info, "  [Sdd enum v3] set %u (%llu models) %i variables\n", set->id, mc, set->k);
 	if (sdd_node_is_false(set->sdd)) {
 		Printf(info, "    (empty)\n");
 	}
