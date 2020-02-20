@@ -1122,6 +1122,9 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 				}
 			}
 			cb(context, vec);
+			for (int i=0; i<set->k; i++) {
+				Printf(info, "%X ", vec[i]);
+			} Printf(info, "\n");
 			for (int i=0; i<set->dom->vectorsize * xstatebits; i++) {
 				if ((i%16) == 0 && i != 0) {
 					Printf(info, " ");
@@ -2373,6 +2376,7 @@ static void set_least_fixpoint_par(vset_t dst, vset_t src, vrel_t _rels[], int r
 }
 
 static void set_reorder() {
+	Warning(info, "set_reorder: Not implemented.\n");
 	// Nope
 }
 
