@@ -30,13 +30,21 @@
 #include <vset-lib/vset_sdd.h>
 
 
-double exists_time  = 0;  // Amount of time used by sdd_exists (Existential Quantification)
-double union_time   = 0;  // Amount of time used by sdd_disjoin
-double conjoin_time = 0;  // Amount of time used by sdd_conjoin
-double debug_time   = 0;  // Amount of time spent on safety checks and sanity checks
-double rel_update_time = 0; // Amount of time spent on rel_update and model enumeration
-double rel_increment_time = 0; // Amount of time spent, within rel_update, on adding a single model to rel
-double sdd_enumerate_time = 0; // Amount of time spent enumerating models with SDD
+//   ---   Time profile
+double exists_time        = 0;  // Amount of time used by sdd_exists (Existential Quantification)
+double union_time         = 0;  // Amount of time used by sdd_disjoin
+double conjoin_time       = 0;  // Amount of time used by sdd_conjoin
+double count_time         = 0;  // Amount of time used by sdd_model_count
+double debug_time         = 0;  // Amount of time spent on safety checks and sanity checks
+double reference_time     = 0;  // Amount of time spent on referencing and dereferencing SDD nodes
+double vtree_setup_time   = 0;  // Amount of time spent on static vtree search, i.e., at the beginning of the program
+double vtree_search_time  = 0;  // Amount of time spent on dynamic vtree search, i.e., during execution
+double rel_update_time    = 0;  // Amount of time spent on rel_update and model enumeration
+double rel_increment_time = 0;  // Amount of time spent, within rel_update, on adding a single model to rel
+double sdd_enumerate_time = 0;  // Amount of time spent enumerating models with SDD
+double nscb_time          = 0;  // Amount of time spent on Next State callbacks
+unsigned int nNextState_cb= 0;  // Number of nextState callbacks performed TODO keep track in rel_update
+clock_t clock_before_nscb;      // Clock time at time of callback; global variable because we detect a callback "between functions"
 int xstatebits = 16;  // bits per integer
 
 
@@ -92,11 +100,13 @@ SddManager* sisyphus = NULL;
 
 void print_footprint() {
 	double time_elapsed = (double)(clock() - sdd_exploration_start);
-	Warning(info,"\t\tEx\tU\tI\tR\tRi\tenum\telems k\tnodes\tMem kB\tgc\tdyn\n"
-"\t\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%lu\t%lu\t%lu\t%u\t%u\n\t\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\n",
+	Warning(info,"\n\tExist\tUnion\tIntesc\tRel\tRi\tenum\tcount\trefrnc\tvstatc\tvtsearc\tnscb\tnnscb\telems k\tnodes\tMem kB\tgc\tdyn\n"
+"Profile\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\t%.4f\t%u\t%lu\t%lu\t%lu\t%u\t%u\n\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\t%.1f\%\n",
 			exists_time / CLOCKS_PER_SEC, union_time / CLOCKS_PER_SEC,
 			conjoin_time / CLOCKS_PER_SEC, rel_update_time / CLOCKS_PER_SEC, rel_increment_time / CLOCKS_PER_SEC,
-			sdd_enumerate_time / CLOCKS_PER_SEC,
+			sdd_enumerate_time / CLOCKS_PER_SEC, count_time / CLOCKS_PER_SEC, reference_time / CLOCKS_PER_SEC, vtree_setup_time / CLOCKS_PER_SEC,
+			vtree_search_time / CLOCKS_PER_SEC, nscb_time / CLOCKS_PER_SEC,
+			nNextState_cb,
 			sdd_manager_live_size(sisyphus)/1000, sdd_manager_live_count(sisyphus), sdd_memory_live_footprint(), gc_count, dynMin_count,
 			100.0f * exists_time / time_elapsed, 100.0f * union_time / time_elapsed,
 			100.0f * conjoin_time / time_elapsed, 100.0f * rel_update_time / time_elapsed, 100.0f* rel_increment_time / time_elapsed,
@@ -591,6 +601,7 @@ void heuristic_vtree_search(Vtree* tree_int, SddManager* manager_int) {
 
 void find_static_vtree() {
 	printf("Finding static vtree.\n");
+	clock_t before = clock();
 	Vtree* tree_int = initial_integer_tree();
 	SddManager* manager_int = sdd_manager_new(tree_int);
 	// This manager contains one node for each integer variable of the program.
@@ -605,6 +616,7 @@ void find_static_vtree() {
 //	sdd_vtree_save_as_dot("vtree-avt.dot", sdd_manager_vtree(manager_int));
 	vtree_from_integer_tree(sdd_manager_vtree(manager_int), manager_int);
 //	sdd_vtree_save_as_dot("vtree-full.dot", sdd_manager_vtree(sisyphus));
+	vtree_setup_time = (double)(clock() - before);
 }
 
 /* This function is called once, when the exploration is about to begin
@@ -695,7 +707,8 @@ void sdd_minimize_maybe() {
 			clock_t before = clock();
 			sdd_manager_minimize_limited(sisyphus);
 			double elapsed = (double)(clock() - before);
-			printf("[Dyn min] Minimization took %f sec\n", elapsed / CLOCKS_PER_SEC);
+			vtree_search_time += elapsed;
+			printf("[Dyn min] Minimization margin %.1f (%.1f sec)\n", search_time_budget - elapsed / CLOCKS_PER_SEC, elapsed / CLOCKS_PER_SEC);
 			dynMin_count++;
 			last_dynamic_minimization = clock();
 		}
@@ -704,9 +717,11 @@ void sdd_minimize_maybe() {
 
 void sdd_set_and_ref(vset_t set, SddNode* S) {
 //	printf("[sdd set and ref] start  set %u  S=%p\n", set->id, S); fflush(stdout);
+	clock_t before = clock();
 	sdd_ref(S, sisyphus);
 //	printf("[sdd set and ref] Referenced.\n"); fflush(stdout);
 	sdd_deref(set->sdd, sisyphus);
+	reference_time += (double)(clock() - before);
 //	printf("[sdd set and ref] Dereferenced.\n"); fflush(stdout);
 	set->sdd = S;
 	unsigned int fp = sdd_memory_live_footprint();
@@ -715,8 +730,10 @@ void sdd_set_and_ref(vset_t set, SddNode* S) {
 }
 
 void sdd_set_rel_and_ref(vrel_t rel, SddNode* R) {
+	clock_t before = clock();
 	sdd_ref(R, sisyphus);
 	sdd_deref(rel->sdd, sisyphus);
+	reference_time += (double)(clock() - before);
 	rel->sdd = R;
 	unsigned int fp = sdd_memory_live_footprint();
 	if (fp > peak_footprint) peak_footprint = fp;
@@ -1174,7 +1191,10 @@ static void set_count(vset_t set, long* nodes, double* elements) {
 		*nodes = peak_footprint;
 	}
 	if (elements != NULL) {
+		clock_t before = clock();
 		SddModelCount mc = set_count_exact(set);
+		count_time += (double)(clock() - before);
+
 	//	printf("  [Sdd set count] Set contains %llu elements.\n", mc);
 		*elements = (double) mc;
 	}
@@ -1209,7 +1229,9 @@ static void set_union(vset_t dst, vset_t src) {
 	}
 	else {
 		if (vset_domains_are_disjoint(dst, src)) {
+			clock_t before = clock();
 			SddNode* conjoin = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+			conjoin_time += (double)(clock() - before);
 			sdd_set_and_ref(dst, conjoin);
 //			printf("  [Sdd set union] Uh oh, we should probably write down that the domain has changed.\n");
 			vset_add_to_domain(dst, src);
@@ -1270,7 +1292,9 @@ static void set_minus(vset_t dst, vset_t src) {
 static void set_intersect(vset_t dst, vset_t src) {
 	printf("[set intersect] set %u := %u /\\ %u.\n", dst->id, dst->id, src->id);
 	if (dst->sdd != src->sdd) {
+		clock_t before = clock();
 		SddNode* conjoined = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
+		conjoin_time += (double)(clock() - before);
 		sdd_set_and_ref(dst, conjoined);
 //		dst->sdd = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
 	}
@@ -1309,7 +1333,7 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 	int n = sdd_manager_var_count(sisyphus);
-	int* exists_map = malloc(sizeof(int) * (n + 1)); // TODO free
+	int* exists_map = malloc(sizeof(int) * (n + 1)); // TODO free or allocate statically
 	unsigned int sdd_var;
 	SddNode* existed;
 	// Initialise map to zero
@@ -1444,7 +1468,7 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	SddNode* renamed = sdd_rename_variables(existed, var_map, sisyphus);
 	sdd_set_and_ref(dst, renamed);
 //	dst->sdd = renamed; // Replaced by sdd_set_and_ref
-	before = clock();
+	before = clock(); // TODO remove?
 	//SddNode* renamedZero = sdd_conjoin(renamed, sdd_primes_zero(), sisyphus);
 	debug_time += (double)(clock() - before);
 //	printf("  [Sdd set next]  Renamed! #conj = %llu. Here it is.\n", mcSrc);
@@ -1488,7 +1512,7 @@ static void set_project(vset_t dst, vset_t src) {
 			//printf("  [Sdd project] Before quantifying, src is:\n");
 			//set_enum(src, 0, 0);
 			// Exists!
-			int* exists_map = malloc((sdd_manager_var_count(sisyphus)+1) * sizeof(int)); // freed
+			int* exists_map = malloc((sdd_manager_var_count(sisyphus)+1) * sizeof(int)); // freed TODO allocate statically
 			exists_map[0] = 0;
 			// Set the primed variables to non-quantified
 			for (int v=0; v<sdd_manager_var_count(sisyphus)/2; v++) {
@@ -1558,6 +1582,7 @@ static void set_zip(vset_t dst, vset_t src) {
 
 static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* cpy) {
 //	printf("[Sdd rel add copy] Relation %u add ", rel->id);
+	nscb_time += (double)(clock() - clock_before_nscb);
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 /*
 	vrel_exposition(rel);
@@ -2239,6 +2264,7 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 //	SddModelCount src_mc = set_count_exact(src);
 //	debug_time += (double)(clock() - before_debug);
 //	printf("[Sdd rel update %u] src = set %u (# = %llu), k=%i rel=%u\n", ncalls, src->id, src_mc, src->k, dst->id);	fflush(stdout);
+//	printf("[Sdd rel update %u] src = set %u, k=%i rel=%u\n", ncalls, src->id, src->k, dst->id);	fflush(stdout);
 //	vrel_exposition(dst);
 	if (sdd_node_is_false(src->sdd)) {
 //		printf("  [Sdd rel update] Source has no models. Abort.\n");
@@ -2255,6 +2281,7 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 	//printf("\n");
 	vrel_ll_t rel_ll = get_vrel(dst->id);
 	SddNode* root = src->sdd;
+	// TODO allocate statically
 	int* e = malloc(sizeof(int) * rel_ll->r_k);
 	if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
 		for (unsigned int i=0; i<rel_update_smart_cache_size; i++) {
@@ -2297,6 +2324,8 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 			}
 			printf("\n");
 */
+			nNextState_cb++;
+			clock_before_nscb = clock();
 			cb(dst, context, e);
 			//printf("  [rel update] Did the callback. Now relation has %llu models.\n", sdd_model_count(dst->sdd, sisyphus));
 		}
