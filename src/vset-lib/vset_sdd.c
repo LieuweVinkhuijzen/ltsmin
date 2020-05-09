@@ -1333,7 +1333,12 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 	int n = sdd_manager_var_count(sisyphus);
-	int* exists_map = malloc(sizeof(int) * (n + 1)); // TODO free or allocate statically
+	// $$> Static allocation update
+	static int* exists_map = 0;
+	if (exists_map == 0) {
+		exists_map = malloc(sizeof(int) * (n + 1));
+	}
+//	int* exists_map = malloc(sizeof(int) * (n+1));
 	unsigned int sdd_var;
 	SddNode* existed;
 	// Initialise map to zero
@@ -1428,8 +1433,12 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 //	printf("  Existed! #conj=%llu\n  [Sdd set next] Renaming...", mcSrc);
 
 	// Rename the primed variables to unprimed variables
-//	SddLiteral* var_map = malloc(sizeof(SddLiteral) * (n + 1)); // TODO free
+	// --> Static allocation update
 	SddLiteral var_map[n+1];
+//	static SddLiteral* var_map = 0;
+//	if (var_map == 0) {
+//		var_map = malloc(sizeof(int) * (n + 1));
+//	}
 	for (int i=0; i<=n; i++) {
 		var_map[i] = i;
 	}
@@ -1468,9 +1477,9 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	SddNode* renamed = sdd_rename_variables(existed, var_map, sisyphus);
 	sdd_set_and_ref(dst, renamed);
 //	dst->sdd = renamed; // Replaced by sdd_set_and_ref
-	before = clock(); // TODO remove?
-	//SddNode* renamedZero = sdd_conjoin(renamed, sdd_primes_zero(), sisyphus);
-	debug_time += (double)(clock() - before);
+//	before = clock(); // TODO remove?
+//	SddNode* renamedZero = sdd_conjoin(renamed, sdd_primes_zero(), sisyphus);
+//	debug_time += (double)(clock() - before);
 //	printf("  [Sdd set next]  Renamed! #conj = %llu. Here it is.\n", mcSrc);
 	/* For debugging purposes
 	if (sdd_node_is_false(renamedZero)) {
@@ -1501,9 +1510,11 @@ static void set_prev(vset_t dst, vset_t src, vrel_t rel, vset_t univ) {
 }
 
 static void set_project(vset_t dst, vset_t src) {
-	static unsigned int ncalls = 0; ncalls++;
+//	static unsigned int ncalls = 0; ncalls++;
 //	printf("[Sdd project %u] set %u := set %u (mc = %llu) ", ncalls, dst->id, src->id, set_count_exact(src));
 	//small_enum(src); printf("\n");
+	// $$> Static allocation update
+	static int* exists_map = 0;
 	if (!vset_domains_are_equal(dst, src)) {
 		if (src->k == -1) {
 //			printf("  [Sdd project] src->k = -1, nsv=%u so existing away.\n", dst->nstate_variables);
@@ -1512,7 +1523,10 @@ static void set_project(vset_t dst, vset_t src) {
 			//printf("  [Sdd project] Before quantifying, src is:\n");
 			//set_enum(src, 0, 0);
 			// Exists!
-			int* exists_map = malloc((sdd_manager_var_count(sisyphus)+1) * sizeof(int)); // freed TODO allocate statically
+			if (exists_map == 0) {
+				exists_map = malloc((sdd_manager_var_count(sisyphus)+1) * sizeof(int)); // TODO allocate statically (done)
+			}
+//			int* exists_map = malloc((sdd_manager_var_count(sisyphus)+1) * sizeof(int));
 			exists_map[0] = 0;
 			// Set the primed variables to non-quantified
 			for (int v=0; v<sdd_manager_var_count(sisyphus)/2; v++) {
@@ -1551,7 +1565,7 @@ static void set_project(vset_t dst, vset_t src) {
 			exists_time += (double)(clock() - before);
 			sdd_set_and_ref(dst, proj);
 //			dst->sdd = proj;
-			free(exists_map);
+//			free(exists_map); // don't do this, now that exists_map is allocated statically
 
 			// Save the fact that dst is now defined over the variables of src
 			// Actually, don't do that
@@ -1569,7 +1583,6 @@ static void set_project(vset_t dst, vset_t src) {
 	}
 	else {
 		sdd_set_and_ref(dst, src->sdd);
-//		dst->sdd = src->sdd; // Replaced by sdd_set_and_ref
 	}
 }
 
@@ -2281,8 +2294,12 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 	//printf("\n");
 	vrel_ll_t rel_ll = get_vrel(dst->id);
 	SddNode* root = src->sdd;
-	// TODO allocate statically
-	int* e = malloc(sizeof(int) * rel_ll->r_k);
+	// $$> Static allocation update
+	static int* e = 0;
+	if (e == 0) {
+		e = malloc(sizeof(int) * dst->dom->vectorsize);
+	}
+//	int* e = malloc(sizeof(int) * rel_ll->r_k);
 	if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
 		for (unsigned int i=0; i<rel_update_smart_cache_size; i++) {
 			rel_update_smart_cache[i] = sdd_manager_false(sisyphus);
