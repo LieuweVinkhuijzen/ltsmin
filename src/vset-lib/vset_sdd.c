@@ -1192,7 +1192,8 @@ static void set_count(vset_t set, long* nodes, double* elements) {
 	}
 	if (elements != NULL) {
 		clock_t before = clock();
-		SddModelCount mc = set_count_exact(set);
+//		SddModelCount mc = set_count_exact(set);
+		SddModelCount mc = 0; // Counting is disabled in production, costs a lot of time.
 		count_time += (double)(clock() - before);
 
 	//	printf("  [Sdd set count] Set contains %llu elements.\n", mc);
