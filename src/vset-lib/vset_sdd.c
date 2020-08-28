@@ -1313,7 +1313,7 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 /*
 */
 	if (sdd_node_is_false(rel->sdd)) {
-		printf("  [Sdd set next]  Rel has no models, so exiting.\n");
+		Printf(info, "  [Sdd set next]  Rel has no models, so exiting.\n");
 		sdd_deref(dst->sdd, sisyphus);
 		dst->sdd = sdd_manager_false(sisyphus);
 		return;
@@ -2394,7 +2394,7 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 		//sdd_mit_free(it); // TODO uncomment this to free the data structure
 	}
 	else if (sdd_node_is_false(root)) {
-//		printf("  [rel update] Relation is False.\n");
+		printf("  [rel update] Relation is False.\n");
 		return;
 	}
 	else if (sdd_node_is_true(root)) {

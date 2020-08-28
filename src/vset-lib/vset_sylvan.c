@@ -545,7 +545,7 @@ set_enum(vset_t set, vset_element_cb cb, void* context)
 {
     int k = set->k == -1 ? set->dom->vectorsize : set->k;
     int vec[k];
-    Printf(info, "[Sylvan] Enumerating set on %i variables.\n", set->k);
+    Printf(info, "[set_enum] Sylvan Enumerating set on %i variables.\n", set->k);
     uint8_t arr[xstatebits * k];
     MTBDD res = mtbdd_enum_all_first(set->bdd, set->state_variables, arr, NULL);
     while (res != mtbdd_false) {
@@ -557,6 +557,7 @@ set_enum(vset_t set, vset_element_cb cb, void* context)
         Printf(info, "\n");
         res = mtbdd_enum_all_next(set->bdd, set->state_variables, arr, NULL);
     }
+    Printf(info, "[set_enum] Done enumerating.\n");
 }
 
 /**
@@ -800,6 +801,7 @@ set_minus(vset_t dst, vset_t src)
 static void
 set_next(vset_t dst, vset_t src, vrel_t rel)
 {
+	Printf(info, "[set_next]\n");
     LACE_ME;
 
     // check if dst and src are the same projections
@@ -836,6 +838,7 @@ set_prev(vset_t dst, vset_t src, vrel_t rel, vset_t univ)
 static void
 set_project(vset_t dst, vset_t src)
 {
+	Printf(info, "[set_project]\n");
     if (dst->state_variables != src->state_variables) {
         LACE_ME;
         dst->bdd = sylvan_project(src->bdd, dst->state_variables);
@@ -873,6 +876,7 @@ set_zip(vset_t dst, vset_t src)
 static void
 rel_add_act(vrel_t rel, const int *src, const int *dst, const int *cpy, const int act)
 {
+	Printf(info, "[rel_add_act]\n");
     LACE_ME;
 
     check_state(rel->dom, rel->r_k, rel->r_proj, src);
@@ -964,6 +968,7 @@ rel_add_act(vrel_t rel, const int *src, const int *dst, const int *cpy, const in
 static void
 rel_add_cpy(vrel_t rel, const int *src, const int *dst, const int *cpy)
 {
+	Printf(info, "[rel_add_cpy]\n");
     LACE_ME;
 
     check_state(rel->dom, rel->r_k, rel->r_proj, src);
@@ -1085,6 +1090,7 @@ TASK_2(BDD, bdd_rel_updater, void*, _ctx, uint8_t*, arr)
 static void
 rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 {
+	Printf(info, "[sylvan rel update]\n");
     LACE_ME;
     struct rel_update_context ctx = (struct rel_update_context){dst, src, src->k == -1 ? src->dom->vectorsize : src->k, cb, context};
     BDD result = sylvan_collect(src->bdd, src->state_variables, TASK(bdd_rel_updater), (void*)&ctx);
@@ -1099,6 +1105,7 @@ rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
         else cur = test;
     }
     mtbdd_refs_popptr(2);
+    Printf(info, "[sylvan rel update] Done.\n");
 }
 
 /**
