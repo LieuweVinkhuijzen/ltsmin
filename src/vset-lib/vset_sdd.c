@@ -1597,7 +1597,7 @@ static void set_zip(vset_t dst, vset_t src) {
 }
 
 static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* cpy) {
-//	printf("[Sdd rel add copy] Relation %u add ", rel->id);
+	Printf(info, "[Sdd rel add copy] Relation %u add ", rel->id);
 	nscb_time += (double)(clock() - clock_before_nscb);
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 /*
@@ -1999,6 +1999,7 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 		printf("Unfortunately feature vtree-increment=9 is not supported yet.\n");
 		break;
 	}
+	Printf(info, "[rel add cpy] Done.\n");
 	rel_increment_time += (double)(clock() - before);
 }
 
