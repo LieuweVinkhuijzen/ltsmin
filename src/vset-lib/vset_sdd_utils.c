@@ -8,7 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-
+#include <hre/user.h>
+#include <hre-io/user.h>
 #include <vset-lib/vector_set.h>
 #include <vset-lib/vset_sdd_utils.h>
 #include <vset-lib/vset_sdd.h>
