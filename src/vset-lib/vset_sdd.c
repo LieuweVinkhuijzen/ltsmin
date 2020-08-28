@@ -1162,8 +1162,8 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 			getchar();
 		}
 	}
-	dummy = cb;
-	dummy = context;
+//	dummy = cb;
+//	dummy = context;
 }
 
 static void set_update(vset_t dst, vset_t src, vset_update_cb cb, void* context) {
@@ -1304,8 +1304,8 @@ static void set_intersect(vset_t dst, vset_t src) {
 
 static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	static unsigned int ncalls = 0; ncalls++;
-/*
 	printf("[Sdd set next %u]   %u := rel %u (*) set %u.\n", ncalls, dst->id, rel->id, src->id);
+/*
 	SddModelCount mcSrc = sdd_model_count(src->sdd, sisyphus);
 	SddModelCount mcDst = sdd_model_count(dst->sdd, sisyphus);
 	SddModelCount mcRel = sdd_model_count(rel->sdd, sisyphus);
@@ -1496,7 +1496,8 @@ static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	}
 	*/
 
-	//vset_exposition(dst);
+	Printf(info, "[set next] Complete. New dst set:\n");
+	vset_exposition(dst);
 
 	//set_enum(dst, 0, 0);
 }
@@ -2335,17 +2336,17 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 					e[i] |= d;
 				}
 			}
-/*
 			printf("  [rel update] e = ");
 			for (int i=0; i<rel_ll->r_k; i++) {
 				printf(" %i", e[i]);
 			}
 			printf("\n");
+/*
 */
 			nNextState_cb++;
 			clock_before_nscb = clock();
 			cb(dst, context, e);
-			//printf("  [rel update] Did the callback. Now relation has %llu models.\n", sdd_model_count(dst->sdd, sisyphus));
+			printf("  [rel update] Did the callback. Now relation has %llu models.\n", sdd_model_count(dst->sdd, sisyphus));
 		}
 		sdd_mit_free(mas);
 		if (vtree_increment_config == 6 || vtree_increment_config == 7 || vtree_increment_config == 8) {
