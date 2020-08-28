@@ -98,11 +98,11 @@ void vset_exposition(vset_t set) {
 	//printf("    [Set exposition] set @%p\n", set->sdd);
 	//printf("    [Set exposition] Models: %llu\n", set_count_exact(set));
 	vset_ll_t set_ll = get_vset(set->id);
-	printf("    [Set exposition] k=%i:  {", set_ll->k);
+	Printf(info, "    [Set exposition] k=%i:  {", set_ll->k);
 	for (int i=0; i<set_ll->k; i++) {
-		printf(" %i", set_ll->proj[i]);
+		Printf(info, " %i", set_ll->proj[i]);
 	}
-	printf("}\n");
+	Printf(info, "}\n");
 }
 
 // printf the values of the relation

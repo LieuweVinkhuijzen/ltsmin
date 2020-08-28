@@ -1087,6 +1087,7 @@ static int set_is_empty(vset_t set) {
 		Warning(info, "Peak %u\n", peak_footprint);
 		return 1;
 	}
+	Printf(info, "[set_is_empty] not empty yet.\n");
 	return 0;
 }
 
@@ -1304,11 +1305,11 @@ static void set_intersect(vset_t dst, vset_t src) {
 
 static void set_next(vset_t dst, vset_t src, vrel_t rel) {
 	static unsigned int ncalls = 0; ncalls++;
-	printf("[Sdd set next %u]   %u := rel %u (*) set %u.\n", ncalls, dst->id, rel->id, src->id);
+	Printf(info, "[Sdd set next %u]   %u := rel %u (*) set %u.\n", ncalls, dst->id, rel->id, src->id);
 	SddModelCount mcSrc = sdd_model_count(src->sdd, sisyphus);
 	SddModelCount mcDst = sdd_model_count(dst->sdd, sisyphus);
 	SddModelCount mcRel = sdd_model_count(rel->sdd, sisyphus);
-	printf("  [Sdd set next]  #src=%llu #dst=%llu #rel=%llu\n", mcSrc, mcDst, mcRel);
+	Printf(info, "  [Sdd set next]  #src=%llu #dst=%llu #rel=%llu\n", mcSrc, mcDst, mcRel);
 /*
 */
 	if (sdd_node_is_false(rel->sdd)) {
@@ -2282,7 +2283,7 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 //	printf("[Sdd rel update %u] src = set %u, k=%i rel=%u\n", ncalls, src->id, src->k, dst->id);	fflush(stdout);
 //	vrel_exposition(dst);
 	if (sdd_node_is_false(src->sdd)) {
-//		printf("  [Sdd rel update] Source has no models. Abort.\n");
+		printf("  [Sdd rel update] Source has no models. Abort.\n");
 		return;
 	}
 	if (dst != 0 && dst->sdd == 0) {
