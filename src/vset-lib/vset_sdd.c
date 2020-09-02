@@ -1017,6 +1017,7 @@ static void state_to_cube(vdom_t dom, int k, const int* proj, const int* state, 
 // e has length dom->vectorsize and each 4-byte integer contains xstatebits bits
 void set_add(vset_t set, const int* e) {
 	// This function is the first function that is called when exploration starts
+	Printf(info, "[set add] set %u\n", set->id);
 	if (!exploration_started) {
 		sdd_initialise_given_rels();
 	}
@@ -1045,7 +1046,7 @@ void set_add(vset_t set, const int* e) {
 }
 
 static int set_member(vset_t set, const int* e) {
-//	printf("[Sdd set member] set %u.\n", set->id);
+	Printf(info, "[Sdd set member] set %u.\n", set->id);
 	SddNode* elem = sdd_manager_true(sisyphus);
 	vset_ll_t set_ll = get_vset(set->id);
 	if (set_ll->k == -1) {
@@ -1092,18 +1093,19 @@ static int set_is_empty(vset_t set) {
 }
 
 static int set_equal(vset_t set1, vset_t set2) {
-//	printf("[Sdd set equal] set %u == set %u?\n", set1->id, set2->id);
+	printf("[Sdd set equal] set %u == set %u?\n", set1->id, set2->id);
 	return set1->sdd == set2->sdd;
 }
 
 static void set_clear(vset_t set) {
-//	printf("[Sdd set clear] set %u := (empty)\n", set->id);
+	Printf(info, "[Sdd set clear] set %u := (empty)\n", set->id);
 	sdd_deref(set->sdd, sisyphus);
 	set->sdd = sdd_manager_false(sisyphus);
 	//printf("  [Sdd set clear] Cleared set.\n");
 }
 
 static void set_copy(vset_t dst, vset_t src) {
+	Printf(info, "[set copy] %u := %u\n", dst->id, src->id);
 	//printf("[Sdd set copy] set %u := set %u (mc = %llu)", dst->id, src->id, set_count_exact(src));
 	//small_enum(src); printf("\n");
 	sdd_set_and_ref(dst, src->sdd);
@@ -1214,6 +1216,7 @@ static void rel_count(vrel_t set, long* nodes, double* elements) {
 
 static void set_union(vset_t dst, vset_t src) {
 	static unsigned int ncalls = 0; ncalls++;
+	Printf(info, "[set union] dst = %u  src = %u\n", dst->id, src->id);
 //	printf("[Sdd set union %u]: %u := %u + %u  (mc = %llu vs %llu) (k=%i vs %i)\n", ncalls, dst->id, dst->id, src->id,
 //			set_count_exact(src), set_count_exact(dst), src->k, dst->k);
 //	SddNode* dstSdd = dst->sdd;
@@ -1275,7 +1278,8 @@ static void set_union(vset_t dst, vset_t src) {
 }
 
 static void set_minus(vset_t dst, vset_t src) {
-//	printf("[Sdd set minus] set %u := %u \\ %u   (mc %u = %llu,  mc %u = %llu)\n", dst->id, dst->id, src->id, dst->id, set_count_exact(dst), src->id, set_count_exact(src));
+	Printf(info, "[set minus] dst = %u  src = %u\n", dst->id, src->id);
+	//	printf("[Sdd set minus] set %u := %u \\ %u   (mc %u = %llu,  mc %u = %llu)\n", dst->id, dst->id, src->id, dst->id, set_count_exact(dst), src->id, set_count_exact(src));
 	if (dst->sdd != src->sdd) {
 		clock_t before = clock();
 		SddNode* diff = sdd_conjoin(dst->sdd, sdd_negate(src->sdd, sisyphus), sisyphus);
@@ -1292,7 +1296,7 @@ static void set_minus(vset_t dst, vset_t src) {
 }
 
 static void set_intersect(vset_t dst, vset_t src) {
-	printf("[set intersect] set %u := %u /\\ %u.\n", dst->id, dst->id, src->id);
+	Printf(info, "[set intersect] set %u := %u /\\ %u.\n", dst->id, dst->id, src->id);
 	if (dst->sdd != src->sdd) {
 		clock_t before = clock();
 		SddNode* conjoined = sdd_conjoin(dst->sdd, src->sdd, sisyphus);
@@ -1514,6 +1518,7 @@ static void set_prev(vset_t dst, vset_t src, vrel_t rel, vset_t univ) {
 
 static void set_project(vset_t dst, vset_t src) {
 //	static unsigned int ncalls = 0; ncalls++;
+	Printf(info, "[set project] dst = %u  src = %u\n",dst->id, src->id);
 //	printf("[Sdd project %u] set %u := set %u (mc = %llu) ", ncalls, dst->id, src->id, set_count_exact(src));
 	//small_enum(src); printf("\n");
 	// $$> Static allocation update
@@ -2004,13 +2009,13 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 }
 
 static void rel_add_act(vrel_t rel, const int* src, const int* dst, const int* cpy, const int act) {
-//	printf("[Sdd rel add action]\n");
+	Printf(info, "[Sdd rel add action] rel: %u\n", rel->id);
 	rel_add_cpy(rel, src, dst, cpy);
 	dummy_int = act;
 }
 
 static void rel_add(vrel_t rel, const int* src, const int* dst) {
-	printf("[Sdd rel add]\n");
+	Printf(info, "[Sdd rel add] rel: %u\n", rel->id);
 	rel_add_cpy(rel, src, dst, 0);
 }
 
@@ -2284,18 +2289,18 @@ static void rel_update(vrel_t dst, vset_t src, vrel_update_cb cb, void* context)
 //	printf("[Sdd rel update %u] src = set %u, k=%i rel=%u\n", ncalls, src->id, src->k, dst->id);	fflush(stdout);
 //	vrel_exposition(dst);
 	if (sdd_node_is_false(src->sdd)) {
-		printf("  [Sdd rel update] Source has no models. Abort.\n");
+		Printf(info, "  [Sdd rel update] Source has no models. Abort.\n");
 		return;
 	}
 	if (dst != 0 && dst->sdd == 0) {
-		printf("[rel update] ERROR    dst->sdd == 0! :-( &dst == %p\n", dst->sdd);
+		Printf(info, "[rel update] ERROR    dst->sdd == 0! :-( &dst == %p\n", dst->sdd);
 		dst->sdd = sdd_manager_false(sisyphus); // This is a dirty quick fix. Why is sdd == 0? Fix that
 	}
 	else if (dst == 0) {
-		printf("[rel update] ERROR    dst == 0! :-(\n");
+		Printf(info, "[rel update] ERROR    dst == 0! :-(\n");
 	}
-	printf("  [rel update] set %u = ", src->id); small_enum(src);
-	printf("\n");
+	Printf(info, "  [rel update] set %u = ", src->id); small_enum(src);
+	Printf(info, "\n");
 	vrel_ll_t rel_ll = get_vrel(dst->id);
 	SddNode* root = src->sdd;
 	// $$> Static allocation update
