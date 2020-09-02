@@ -1088,7 +1088,7 @@ static int set_is_empty(vset_t set) {
 		Warning(info, "Peak %u\n", peak_footprint);
 		return 1;
 	}
-	Printf(info, "[set_is_empty] not empty yet.\n");
+	Printf(info, "[set_is_empty] %u not empty yet.\n", set->id);
 	return 0;
 }
 
@@ -1117,7 +1117,7 @@ static void set_copy(vset_t dst, vset_t src) {
 
 static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 	SddModelCount mc = set_count_exact(set);
-	Printf(info, "  [Sdd enum v3] set %u (%llu models) %i variables\n", set->id, mc, set->k);
+	Printf(info, "[Sdd enum v3] set %u (%llu models) %i variables\n", set->id, mc, set->k);
 	if (sdd_node_is_false(set->sdd)) {
 		Printf(info, "    (empty)\n");
 	}
@@ -1518,7 +1518,7 @@ static void set_prev(vset_t dst, vset_t src, vrel_t rel, vset_t univ) {
 
 static void set_project(vset_t dst, vset_t src) {
 //	static unsigned int ncalls = 0; ncalls++;
-	Printf(info, "[set project] dst = %u  src = %u\n",dst->id, src->id);
+	Printf(info, "[set project] %u := %u\n",dst->id, src->id);
 //	printf("[Sdd project %u] set %u := set %u (mc = %llu) ", ncalls, dst->id, src->id, set_count_exact(src));
 	//small_enum(src); printf("\n");
 	// $$> Static allocation update
@@ -1602,7 +1602,7 @@ static void set_zip(vset_t dst, vset_t src) {
 }
 
 static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* cpy) {
-	Printf(info, "[Sdd rel add copy] Relation %u add ", rel->id);
+	Printf(info, "[Sdd rel add copy] Relation %u add\n", rel->id);
 	nscb_time += (double)(clock() - clock_before_nscb);
 	vrel_ll_t rel_ll = get_vrel(rel->id);
 /*
@@ -2004,12 +2004,13 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 		printf("Unfortunately feature vtree-increment=9 is not supported yet.\n");
 		break;
 	}
-	Printf(info, "[rel add cpy] Done.\n");
+	SddModelCount mcRel = sdd_model_count(rel->sdd, sisyphus); // TODO remove upon release
+	Printf(info, "[rel add cpy] Done. Now rel contains %llu transitions.\n", mcRel);
 	rel_increment_time += (double)(clock() - before);
 }
 
 static void rel_add_act(vrel_t rel, const int* src, const int* dst, const int* cpy, const int act) {
-	Printf(info, "[Sdd rel add action] rel: %u\n", rel->id);
+	Printf(info, "[Sdd rel add action] rel: %u  act=%i\n", rel->id, act);
 	rel_add_cpy(rel, src, dst, cpy);
 	dummy_int = act;
 }
@@ -2442,7 +2443,7 @@ static int separates_rw() {
 }
 
 static void dom_set_function_pointers(vdom_t dom) {
-	printf("[Sdd]  Setting function pointers.\n");
+	Printf(info, "[Sdd]  Setting function pointers.\n");
 	//   Sets
 	dom->shared.set_create = set_create;
 	dom->shared.set_destroy = set_destroy;
