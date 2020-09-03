@@ -1167,6 +1167,11 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 			getchar();
 		}
 	}
+
+	// !! this code is copy-pasted from rel_update
+	//  (changed my mind: Not importing any code from there.)
+	//  (end of code copy-pasted from rel_update
+
 	Printf(info, "[set enum] Done.\n");
 //	dummy = cb;
 //	dummy = context;
@@ -1633,11 +1638,71 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 	SddNode* x_and_prime;
 	SddNode* integer_sdd;
 	SddNode* copy_literal;
-	int v_r, v_w;
+	int w, v_r, v_w;
 
 	switch (vtree_increment_config) {
 	case 0:
-		printf("Please use the option --vtree-increment=1|2|3|4|5|6|7|8.\n");
+//		printf("Please use the option --vtree-increment=1|2|3|4|5|6|7|8.\n");
+		// Prepare srcSdd
+		for (int v=0; v<rel_ll->r_k; v++) {
+	//		printf("  [Sdd rel add copy] Read variable %i: %i\n", v, rel_ll->r_proj[v]);
+			for (int i=0; i<xstatebits; i++) {
+				var = xstatebits*rel_ll->r_proj[v] + i + 1;
+				srcSdd = sdd_conjoin(srcSdd, getLiteral(var, src[v] & (1 << i), 0), sisyphus);
+			}
+		}
+		// Prepare dstSdd
+		//printf("  [Sdd rel add copy] Finished src, dst in cases k != -1"); fflush(stdout);
+		for (int v=0; v<rel_ll->w_k; v++) {
+//			printf("  [Sdd rel add copy] Write variable %i: %i\n", v, rel_ll->w_proj[v]); fflush(stdout);
+			if (cpy && cpy[v]) {
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->w_proj[v] + i + 1;
+					copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+											   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+					dstSdd = sdd_conjoin(dstSdd, copy_literal, sisyphus);
+				}
+			} else {
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->w_proj[v] + i + 1;
+					dstSdd = sdd_conjoin    (dstSdd, getLiteral(var, dst[v] & (1 << i), 1), sisyphus);
+				}
+			}
+/*
+			for (int i=0; i<xstatebits; i++) {
+				var = xstatebits*rel_ll->w_proj[v] + i + 1;
+				if (cpy && cpy[v]) {
+					copy_literal = sdd_disjoin(sdd_conjoin(getLiteral(var, 0, 0), getLiteral(var, 0, 1), sisyphus),
+											   sdd_conjoin(getLiteral(var, 1, 0), getLiteral(var, 1, 1), sisyphus), sisyphus);
+					dstSdd = sdd_conjoin(dstSdd, copy_literal, sisyphus);
+				} else {
+					dstSdd = sdd_conjoin    (dstSdd, getLiteral(var, dst[v] & (1 << i), 1), sisyphus);
+				}
+			}
+*/
+//				If this variable is copied, constrain srcSdd???
+		}
+		w = 0;
+		for (int v=0; v<rel_ll->r_k; v++) {
+			// Invariant: w_proj[w] >= r_proj[v]
+			while (w < rel_ll->w_k && rel_ll->w_proj[w] < rel_ll->r_proj[v]) w++;
+			if (w > rel_ll->w_k || rel_ll->w_proj[w] != rel_ll->r_proj[v]) {
+				// Variable is read but not written, so cover it
+				for (int i=0; i<xstatebits; i++) {
+					var = xstatebits*rel_ll->r_proj[v] + i + 1;
+					dstSdd = sdd_conjoin(dstSdd, getLiteral(var, src[v] & (1 << i), 1), sisyphus);
+				}
+			}
+		}
+
+	//	printf("  [Sdd rel add cpy] edge: %llu and %llu. ", sdd_model_count(srcSdd, sisyphus), sdd_model_count(dstSdd, sisyphus));
+		src_and_dst = sdd_conjoin(srcSdd, dstSdd, sisyphus);
+	//	printf("Ok. |.|=%llu. Add: ", sdd_model_count(src_and_dst, sisyphus));
+	//	rel->sdd = sdd_disjoin(rel->sdd, src_and_dst, sisyphus); // Replaced by sdd_set_rel_and_ref
+		SddNode* disjoin = sdd_disjoin(rel->sdd, src_and_dst, sisyphus);
+		sdd_set_rel_and_ref(rel, disjoin);
+//		rel_update_smart_temp = sdd_disjoin(rel_update_smart_temp, src_and_dst, sisyphus);
+	//	printf("Ok.\n"); //[Sdd rel add cpy] Now rel has %llu models.\n", sdd_model_count(rel->sdd, sisyphus));
 		break;
 	case 1:
 		// Prepare srcSdd
@@ -1679,7 +1744,7 @@ static void rel_add_cpy(vrel_t rel, const int* src, const int* dst, const int* c
 */
 //				If this variable is copied, constrain srcSdd???
 		}
-		int w = 0;
+		w = 0;
 		for (int v=0; v<rel_ll->r_k; v++) {
 			// Invariant: w_proj[w] >= r_proj[v]
 			while (w < rel_ll->w_k && rel_ll->w_proj[w] < rel_ll->r_proj[v]) w++;
