@@ -1141,7 +1141,9 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 					vec[i] |= d;
 				}
 			}
+			Printf(info, "[set enum %u]  Callback...\n", set->id);
 			cb(context, vec);
+			Printf(info, "[set enum %u], back from callback.\n", set->id);
 			for (int i=0; i<set->k; i++) {
 				Printf(info, "%X ", vec[i]);
 			} Printf(info, "\n");
@@ -1165,6 +1167,7 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 			getchar();
 		}
 	}
+	Printf(info, "[set enum] Done.\n");
 //	dummy = cb;
 //	dummy = context;
 }
