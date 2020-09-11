@@ -1128,7 +1128,7 @@ static void set_enum(vset_t set, vset_element_cb cb, void* context) {
 		SddModelCount i = 0;
 		struct sdd_mit_master mas;
 		for (mas = sdd_get_iterator(set); mas.finished == 0; sdd_next_model(&mas)) {
-			Printf(info, "    ");
+//			Printf(info, "    ");
 			// Refactor mas.e to a bit-array
 			for (int i=0; i<k; i++) {
 				vec[i] = 0; // TODO put this in the next loop
